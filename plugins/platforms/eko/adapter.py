@@ -216,3 +216,280 @@ class _EkoClient:
                     raise RuntimeError(
                         f"Eko push failed ({resp.status}): {body[:200]}"
                     )
+
+
+# ---------------------------------------------------------------------------
+# Adapter
+# ---------------------------------------------------------------------------
+
+class EkoAdapter(BasePlatformAdapter):
+    """Eko Messaging API gateway adapter."""
+
+    def __init__(self, config, **kwargs):
+        platform = Platform("eko")
+        super().__init__(config=config, platform=platform)
+
+        extra = getattr(config, "extra", {}) or {}
+
+        # Required credentials
+        self.base_url = (
+            os.getenv("EKO_BASE_URL") or extra.get("base_url", "")
+        ).rstrip("/")
+        self.oauth_client_id = (
+            os.getenv("EKO_OAUTH_CLIENT_ID")
+            or extra.get("oauth_client_id", "")
+        )
+        self.oauth_client_secret = (
+            os.getenv("EKO_OAUTH_CLIENT_SECRET")
+            or extra.get("oauth_client_secret", "")
+        )
+
+        # Webhook server
+        self.webhook_host = os.getenv("EKO_HOST") or extra.get("host", "0.0.0.0")
+        try:
+            self.webhook_port = int(
+                os.getenv("EKO_PORT") or extra.get("port", DEFAULT_WEBHOOK_PORT)
+            )
+        except (TypeError, ValueError):
+            self.webhook_port = DEFAULT_WEBHOOK_PORT
+        self.webhook_path = (
+            os.getenv("EKO_WEBHOOK_PATH")
+            or extra.get("webhook_path", DEFAULT_WEBHOOK_PATH)
+        )
+
+        # Allowlist
+        self.allow_all = _truthy_env(
+            "EKO_ALLOW_ALL_USERS", bool(extra.get("allow_all_users", False))
+        )
+        self.allowed_users = _csv_set(
+            os.getenv("EKO_ALLOWED_USERS", "")
+        ) | set(extra.get("allowed_users", []))
+
+        # Reply token TTL
+        try:
+            self.reply_token_ttl = float(
+                os.getenv("EKO_REPLY_TOKEN_TTL")
+                or extra.get("reply_token_ttl", DEFAULT_REPLY_TOKEN_TTL)
+            )
+        except (TypeError, ValueError):
+            self.reply_token_ttl = DEFAULT_REPLY_TOKEN_TTL
+
+        # Runtime state
+        self._client: Optional[_EkoClient] = None
+        self._app = None  # aiohttp.web.Application
+        self._runner = None  # aiohttp.web.AppRunner
+        self._site = None  # aiohttp.web.TCPSite
+        self._reply_tokens: Dict[str, Tuple[str, float]] = {}  # chat_id -> (token, expiry)
+        self._dedup = _MessageDeduplicator()
+        self._bot_user_id: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    async def connect(self) -> bool:
+        if not self.base_url:
+            self._set_fatal_error(
+                "config_missing",
+                "EKO_BASE_URL must be set",
+                retryable=False,
+            )
+            return False
+        if not self.oauth_client_id or not self.oauth_client_secret:
+            self._set_fatal_error(
+                "config_missing",
+                "EKO_OAUTH_CLIENT_ID and EKO_OAUTH_CLIENT_SECRET must be set",
+                retryable=False,
+            )
+            return False
+
+        self._client = _EkoClient(
+            base_url=self.base_url,
+            client_id=self.oauth_client_id,
+            client_secret=self.oauth_client_secret,
+        )
+
+        # Verify OAuth credentials work before starting the webhook server.
+        try:
+            await self._client.ensure_token()
+        except Exception as exc:
+            self._set_fatal_error(
+                "auth_failed",
+                f"Eko OAuth authentication failed: {exc}",
+                retryable=True,
+            )
+            return False
+
+        # Start the aiohttp webhook server.
+        try:
+            from aiohttp import web
+        except ImportError:
+            self._set_fatal_error(
+                "missing_dep",
+                "aiohttp is required for the Eko adapter - install with `pip install aiohttp`",
+                retryable=False,
+            )
+            return False
+
+        self._app = web.Application(client_max_size=WEBHOOK_BODY_MAX_BYTES)
+        self._app.router.add_post(self.webhook_path, self._handle_webhook)
+        self._app.router.add_get(
+            f"{self.webhook_path}/health", self._handle_health
+        )
+
+        self._runner = web.AppRunner(self._app)
+        try:
+            await self._runner.setup()
+            self._site = web.TCPSite(
+                self._runner, self.webhook_host, self.webhook_port
+            )
+            await self._site.start()
+        except OSError as exc:
+            self._set_fatal_error(
+                "bind_failed",
+                f"Could not bind Eko webhook on {self.webhook_host}:{self.webhook_port}: {exc}",
+                retryable=True,
+            )
+            return False
+
+        self._mark_connected()
+        logger.info(
+            "Eko: webhook listening on %s:%s%s",
+            self.webhook_host,
+            self.webhook_port,
+            self.webhook_path,
+        )
+        return True
+
+    async def disconnect(self) -> None:
+        self._mark_disconnected()
+
+        if self._site is not None:
+            try:
+                await self._site.stop()
+            except Exception:
+                pass
+            self._site = None
+        if self._runner is not None:
+            try:
+                await self._runner.cleanup()
+            except Exception:
+                pass
+            self._runner = None
+        self._app = None
+
+    # ------------------------------------------------------------------
+    # Webhook handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_health(self, request) -> Any:
+        from aiohttp import web
+        return web.json_response({"status": "ok", "platform": "eko"})
+
+    async def _handle_webhook(self, request) -> Any:
+        from aiohttp import web
+
+        try:
+            body = await request.read()
+        except Exception as exc:
+            logger.debug("Eko: read failed: %s", exc)
+            return web.Response(status=400, text="bad request")
+        if len(body) > WEBHOOK_BODY_MAX_BYTES:
+            return web.Response(status=413, text="payload too large")
+
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return web.Response(status=400, text="bad json")
+
+        events = payload.get("events", []) or []
+        for event in events:
+            try:
+                await self._dispatch_event(event)
+            except Exception:
+                logger.exception("Eko: dispatch_event failed")
+
+        return web.Response(status=200, text="ok")
+
+    async def _dispatch_event(self, event: Dict[str, Any]) -> None:
+        event_type = event.get("type")
+
+        # Dedup retries.
+        if self._dedup.is_duplicate(event):
+            logger.debug("Eko: ignoring duplicate event")
+            return
+
+        # Filter self-messages if we know our own user ID.
+        source = event.get("source") or {}
+        sender_uid = source.get("userId") or source.get("uid", "")
+        if self._bot_user_id and sender_uid == self._bot_user_id:
+            return
+
+        # Allowlist gate.
+        if not self._allowed_for_source(source):
+            logger.info("Eko: rejecting unauthorized source %s", source)
+            return
+
+        if event_type == "message":
+            await self._handle_message_event(event)
+        elif event_type == "join":
+            logger.info("Eko: user created chat - %s", source)
+        else:
+            logger.debug("Eko: ignoring event type %r", event_type)
+
+    async def _handle_message_event(self, event: Dict[str, Any]) -> None:
+        msg = event.get("message") or {}
+        msg_type = msg.get("type", "")
+        message_id = msg.get("id", "")
+        reply_token = event.get("replyToken", "")
+        source = event.get("source") or {}
+
+        # Eko source: {"type": "user", "userId": "...", "username": "..."}
+        # or {"type": "direct_chat", "uid": "..."}
+        uid = source.get("userId") or source.get("uid", "")
+        username = source.get("username", "") or uid
+
+        # Stash the reply token for outbound use.
+        if uid and reply_token:
+            self._reply_tokens[uid] = (
+                reply_token,
+                time.time() + self.reply_token_ttl,
+            )
+
+        # Extract text.
+        if msg_type == "text":
+            text = msg.get("text", "") or ""
+        elif msg_type == "image":
+            # Media support deferred - surface a placeholder.
+            text = "[image]"
+        elif msg_type == "file":
+            text = "[file]"
+        else:
+            text = f"[unsupported message type: {msg_type}]"
+
+        source_obj = self.build_source(
+            chat_id=uid,
+            chat_type="dm",
+            user_id=uid,
+            user_name=username,
+            chat_name=username,
+        )
+
+        event_obj = MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source_obj,
+            raw_message=event,
+            message_id=message_id,
+        )
+
+        await self.handle_message(event_obj)
+
+    def _allowed_for_source(self, source: Dict[str, Any]) -> bool:
+        """Check if the source user is in the allowlist."""
+        if self.allow_all:
+            return True
+        uid = source.get("userId") or source.get("uid", "")
+        if not uid:
+            return False
+        return uid in self.allowed_users
