@@ -141,15 +141,14 @@ class _EkoClient:
 
         url = f"{self._base_url}/oauth/token"
         # Eko OAuth expects client_credentials grant.
-        payload = {
-            "grant_type": "client_credentials",
-            "client_id": self._client_id,
-            "client_secret": self._client_secret,
-            "scope": "bot",
-        }
+        payload = aiohttp.FormData()
+        payload.add_field("grant_type", "client_credentials")
+        payload.add_field("client_id", self._client_id)
+        payload.add_field("client_secret", self._client_secret)
+        payload.add_field("scope", "bot")
         timeout = aiohttp.ClientTimeout(total=self._timeout)
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(url, json=payload) as resp:
+            async with session.post(url, data=payload) as resp:
                 if resp.status >= 400:
                     body = await resp.text()
                     raise RuntimeError(
