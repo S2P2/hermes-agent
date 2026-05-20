@@ -673,3 +673,91 @@ class TestInboundPicture:
         await adapter._handle_message_event(event)
         call_args = adapter.handle_message.call_args[0][0]
         assert call_args.text == "[sticker]"
+
+
+# ---------------------------------------------------------------------------
+# 13. Outbound media (send_image_file, send_image, send_document)
+# ---------------------------------------------------------------------------
+
+class TestOutboundMedia:
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_uses_reply_token(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._client = MagicMock()
+        adapter._client.reply_picture = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
+            result = await adapter.send_image_file("chat1", "/fake/img.png", caption="hi")
+        assert result.success
+        adapter._client.reply_picture.assert_called_once()
+        adapter._client.push_picture.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_falls_back_to_push(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock()
+        adapter._client.push_picture = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
+            result = await adapter.send_image_file("chat1", "/fake/img.png", caption="hi")
+        assert result.success
+        adapter._client.push_picture.assert_called_once_with(
+            "chat1",
+            b"\x89PNG data",
+            "img.png",
+            caption="hi",
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_image_downloads_and_delegates(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock()
+        adapter._client.push_picture = AsyncMock()
+
+        with patch("gateway.platforms.base.cache_image_from_url", AsyncMock(return_value="/cache/img_abc.jpg")):
+            with patch("pathlib.Path.read_bytes", return_value=b"\xff\xd8\xff image data"):
+                result = await adapter.send_image("chat1", "https://example.com/img.jpg", caption="look")
+        assert result.success
+        adapter._client.push_picture.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_document_pushes_file(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock()
+        adapter._client.push_file = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"%PDF-1.4 data"):
+            result = await adapter.send_document(
+                "chat1", "/fake/report.pdf", file_name="report.pdf"
+            )
+        assert result.success
+        adapter._client.push_file.assert_called_once_with(
+            "chat1",
+            b"%PDF-1.4 data",
+            "report.pdf",
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_auth_error_retries_push(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._client = MagicMock()
+        adapter._client.reply_picture = AsyncMock(side_effect=_EkoAuthError("401"))
+        adapter._client.push_picture = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
+            result = await adapter.send_image_file("chat1", "/fake/img.png")
+        assert result.success
+        adapter._client.push_picture.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_document_not_connected_returns_error(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._client = None
+        result = await adapter.send_document("chat1", "/fake/file.pdf")
+        assert not result.success

@@ -750,6 +750,130 @@ class EkoAdapter(BasePlatformAdapter):
             logger.error("Eko: send failed: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
 
+    # ------------------------------------------------------------------
+    # Outbound send (images and files)
+    # ------------------------------------------------------------------
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image file to an Eko user."""
+        if not self._client:
+            return SendResult(success=False, error="Eko adapter not connected")
+
+        from pathlib import Path
+
+        try:
+            file_bytes = Path(image_path).read_bytes()
+        except OSError as exc:
+            return SendResult(success=False, error=f"Cannot read image: {exc}")
+
+        filename = Path(image_path).name or "image.jpg"
+
+        # Try reply token first, fall back to push.
+        token, used_reply = self._consume_reply_token(chat_id)
+        if used_reply:
+            try:
+                await self._client.reply_picture(token, file_bytes, filename)
+                return SendResult(success=True, message_id=token)
+            except _EkoAuthError:
+                try:
+                    await self._client.push_picture(
+                        chat_id, file_bytes, filename, caption=caption or ""
+                    )
+                    return SendResult(success=True, message_id=None)
+                except Exception as exc2:
+                    return SendResult(success=False, error=str(exc2))
+            except RuntimeError as exc:
+                logger.info("Eko: reply picture rejected (%s); falling back to push", exc)
+
+        try:
+            await self._client.push_picture(
+                chat_id, file_bytes, filename, caption=caption or ""
+            )
+            return SendResult(success=True, message_id=None)
+        except _EkoAuthError:
+            try:
+                await self._client.push_picture(
+                    chat_id, file_bytes, filename, caption=caption or ""
+                )
+                return SendResult(success=True, message_id=None)
+            except Exception as exc2:
+                return SendResult(success=False, error=str(exc2))
+        except RuntimeError as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an image from a URL to an Eko user.
+
+        Downloads the image to a local cache first, then delegates to
+        send_image_file for native delivery.
+        """
+        try:
+            from gateway.platforms.base import cache_image_from_url
+
+            local_path = await cache_image_from_url(image_url)
+        except Exception as exc:
+            logger.warning("Eko: failed to download image URL: %s", exc)
+            return SendResult(success=False, error=f"Cannot download image: {exc}")
+
+        return await self.send_image_file(
+            chat_id, local_path, caption=caption, reply_to=reply_to, metadata=metadata
+        )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a file/document to an Eko user."""
+        if not self._client:
+            return SendResult(success=False, error="Eko adapter not connected")
+
+        from pathlib import Path
+
+        try:
+            file_bytes = Path(file_path).read_bytes()
+        except OSError as exc:
+            return SendResult(success=False, error=f"Cannot read file: {exc}")
+
+        filename = file_name or Path(file_path).name or "document"
+
+        # No reply-token endpoint documented for files — always push.
+        try:
+            await self._client.push_file(chat_id, file_bytes, filename)
+            return SendResult(success=True, message_id=None)
+        except _EkoAuthError:
+            try:
+                await self._client.push_file(chat_id, file_bytes, filename)
+                return SendResult(success=True, message_id=None)
+            except Exception as exc2:
+                return SendResult(success=False, error=str(exc2))
+        except RuntimeError as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+
     def _consume_reply_token(self, chat_id: str) -> Tuple[str, bool]:
         """Consume a stashed reply token if present and unexpired.
 
