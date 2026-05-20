@@ -48,9 +48,9 @@ Default PR repo → S2P2/hermes-agent
 
 ## Next Steps (see README roadmap)
 
-1. **Image/file receiving + sending** — biggest v2 feature
+1. ~~**Image/file receiving + sending**~~ **Done (branch: `feat/eko-image-file`)** — inbound pictures only (Eko doesn't send file webhooks)
 2. **Group chat support** — Eko API supports it; real payload has `groupType`, `groupId`, `topicId`
-3. ~~**Webhook signature verification**~~ **Done (branch: `feat/eko-webhook-signature`)**
+3. ~~**Webhook signature verification**~~ **Done (merged to main)**
 4. Run `pytest tests/gateway/test_eko_plugin.py` to validate tests
 5. Tune reply token TTL
 6. **Populate `_bot_user_id`** from `meta.botId` — enables self-message filtering
