@@ -597,8 +597,6 @@ class EkoAdapter(BasePlatformAdapter):
         reply_token = event.get("replyToken", "")
         source = event.get("source") or {}
 
-        # Eko source: {"type": "user", "userId": "...", "username": "..."}
-        # or {"type": "direct_chat", "uid": "..."}
         uid = source.get("userId") or source.get("uid", "")
         username = source.get("username", "") or uid
 
@@ -609,12 +607,23 @@ class EkoAdapter(BasePlatformAdapter):
                 time.time() + self.reply_token_ttl,
             )
 
-        # Extract text.
+        # Media attachments (downloaded and cached locally).
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        text = ""
+        message_type = MessageType.TEXT
+
         if msg_type == "text":
             text = msg.get("text", "") or ""
-        elif msg_type == "image":
-            # Media support deferred - surface a placeholder.
+        elif msg_type == "picture":
+            local_path = await self._download_picture(msg)
+            if local_path:
+                media_urls.append(local_path)
+                media_types.append(self._mime_from_filename(msg.get("fileName", "")))
+                message_type = MessageType.PHOTO
             text = "[image]"
+        elif msg_type == "sticker":
+            text = "[sticker]"
         elif msg_type == "file":
             text = "[file]"
         else:
@@ -630,13 +639,56 @@ class EkoAdapter(BasePlatformAdapter):
 
         event_obj = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT,
+            message_type=message_type,
             source=source_obj,
             raw_message=event,
             message_id=message_id,
+            media_urls=media_urls,
+            media_types=media_types,
         )
 
         await self.handle_message(event_obj)
+
+    async def _download_picture(self, msg: Dict[str, Any]) -> Optional[str]:
+        """Download an inbound picture and cache it locally.
+
+        Returns the cached file path, or None on failure.
+        """
+        picture_id = msg.get("pictureId", "")
+        if not picture_id or not self._client:
+            return None
+        try:
+            data = await self._client.fetch_picture(picture_id)
+        except Exception as exc:
+            logger.warning("Eko: failed to download picture %s: %s", picture_id, exc)
+            return None
+        ext = self._ext_from_filename(msg.get("fileName", ""), default=".jpg")
+        try:
+            from gateway.platforms.base import cache_image_from_bytes
+            return cache_image_from_bytes(data, ext=ext)
+        except Exception as exc:
+            logger.warning("Eko: failed to cache picture %s: %s", picture_id, exc)
+            return None
+
+    @staticmethod
+    def _ext_from_filename(filename: str, default: str = ".bin") -> str:
+        """Extract extension from a filename, with a fallback."""
+        if filename and "." in filename:
+            ext = "." + filename.rsplit(".", 1)[-1].lower()
+            return ext if len(ext) <= 10 else default
+        return default
+
+    @staticmethod
+    def _mime_from_filename(filename: str) -> str:
+        """Guess MIME type from filename extension."""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        return {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "webp": "image/webp",
+        }.get(ext, "image/jpeg")
 
     def _allowed_for_source(self, source: Dict[str, Any]) -> bool:
         """Check if the source user is in the allowlist."""

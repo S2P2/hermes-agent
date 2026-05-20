@@ -25,6 +25,9 @@ import pytest
 
 from tests.gateway._plugin_adapter_loader import load_plugin_adapter
 
+from gateway.config import Platform
+from gateway.platforms.base import MessageType
+
 _eko = load_plugin_adapter("eko")
 
 EkoAdapter = _eko.EkoAdapter
@@ -563,3 +566,110 @@ class TestEkoClientOutboundMedia:
 
         assert client._access_token is None
         assert client._token_expires_at == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 12. Inbound picture handling
+# ---------------------------------------------------------------------------
+
+class TestInboundPicture:
+
+    @pytest.mark.asyncio
+    async def test_picture_downloads_and_caches(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._client = MagicMock()
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        adapter._client.fetch_picture = AsyncMock(return_value=fake_png)
+        adapter._reply_tokens = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+
+        event = {
+            "replyToken": "tok123",
+            "type": "message",
+            "source": {"type": "user", "userId": "user123", "username": "alice"},
+            "message": {
+                "id": "msg123",
+                "type": "picture",
+                "pictureId": "pic456",
+                "fileName": "photo.png",
+                "groupId": "g1",
+                "groupType": "direct_chat",
+                "topicId": "t1",
+            },
+            "timestamp": "2026-05-21T00:00:00.000Z",
+        }
+
+        with patch(
+            "gateway.platforms.base.cache_image_from_bytes",
+            return_value="/cache/img_abc.png",
+        ) as mock_cache:
+            await adapter._handle_message_event(event)
+
+        adapter._client.fetch_picture.assert_called_once_with("pic456")
+        mock_cache.assert_called_once_with(fake_png, ext=".png")
+
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.message_type == MessageType.PHOTO
+        assert call_args.media_urls == ["/cache/img_abc.png"]
+        assert "image/png" in call_args.media_types
+
+    @pytest.mark.asyncio
+    async def test_picture_download_failure_falls_back_to_placeholder(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._client = MagicMock()
+        adapter._client.fetch_picture = AsyncMock(
+            side_effect=RuntimeError("download failed")
+        )
+        adapter._reply_tokens = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+
+        event = {
+            "replyToken": "tok123",
+            "type": "message",
+            "source": {"type": "user", "userId": "user123", "username": "alice"},
+            "message": {
+                "id": "msg123",
+                "type": "picture",
+                "pictureId": "pic456",
+                "fileName": "photo.png",
+            },
+            "timestamp": "2026-05-21T00:00:00.000Z",
+        }
+
+        await adapter._handle_message_event(event)
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.text == "[image]"
+        assert call_args.media_urls == []
+        assert call_args.message_type == MessageType.TEXT
+
+    @pytest.mark.asyncio
+    async def test_sticker_surfaces_placeholder(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+
+        event = {
+            "replyToken": "tok123",
+            "type": "message",
+            "source": {"type": "user", "userId": "user123", "username": "alice"},
+            "message": {
+                "id": "msg_sticker",
+                "type": "sticker",
+                "packageId": "pkg1",
+                "stickerId": "stk1",
+            },
+            "timestamp": "2026-05-21T00:00:00.000Z",
+        }
+
+        await adapter._handle_message_event(event)
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.text == "[sticker]"
