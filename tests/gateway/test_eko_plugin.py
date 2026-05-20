@@ -8,10 +8,14 @@ Covers:
 5. Outbound send routing (reply → push fallback, 401 retry)
 6. Plugin registration metadata
 7. Config validation and env enablement
+8. Webhook signature verification (X-Eko-Signature HMAC-SHA256-Base64)
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import time
@@ -315,6 +319,81 @@ class TestConfigValidation:
 
 # ---------------------------------------------------------------------------
 # 8. Env enablement
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 8. Webhook signature verification
+# ---------------------------------------------------------------------------
+
+class TestSignatureVerification:
+
+    def _sign(self, secret: str, body: bytes) -> str:
+        """Compute expected x-amity-signature for a given body."""
+        return base64.b64encode(
+            hmac.new(
+                secret.encode("utf-8"), body, hashlib.sha256
+            ).digest()
+        ).decode("utf-8")
+
+    def _make_adapter(self, secret: str = "my_oauth_secret") -> EkoAdapter:
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.oauth_client_secret = secret
+        return adapter
+
+    def test_valid_signature_passes(self):
+        adapter = self._make_adapter("my_oauth_secret")
+        body = b'{"events":[]}'
+        sig = self._sign("my_oauth_secret", body)
+        assert adapter._verify_signature(body, sig)
+
+    def test_wrong_secret_rejected(self):
+        adapter = self._make_adapter("my_oauth_secret")
+        body = b'{"events":[]}'
+        sig = self._sign("wrong_secret", body)
+        assert not adapter._verify_signature(body, sig)
+
+    def test_tampered_body_rejected(self):
+        adapter = self._make_adapter("my_oauth_secret")
+        body = b'{"events":[{"type":"message"}]}'
+        sig = self._sign("my_oauth_secret", body)
+        tampered = body.replace(b"message", b"join")
+        assert not adapter._verify_signature(tampered, sig)
+
+    def test_empty_secret_always_fails(self):
+        adapter = self._make_adapter("")
+        body = b'{"events":[]}'
+        sig = self._sign("", body)
+        assert not adapter._verify_signature(body, sig)
+
+    def test_none_secret_always_fails(self):
+        adapter = self._make_adapter("my_oauth_secret")
+        adapter.oauth_client_secret = None
+        body = b'{"events":[]}'
+        sig = self._sign("my_oauth_secret", body)
+        assert not adapter._verify_signature(body, sig)
+
+    def test_realistic_payload(self):
+        adapter = self._make_adapter("client_secret_abc")
+        payload = {
+            "events": [{
+                "replyToken": "8350939a",
+                "type": "message",
+                "source": {
+                    "type": "user",
+                    "userId": "5ac20cd3",
+                    "username": "alice",
+                },
+                "message": {"id": "5bcaa505", "type": "text", "text": "hello"},
+                "timestamp": "2018-10-19T03:46:07.866Z",
+            }]
+        }
+        body = json.dumps(payload).encode("utf-8")
+        sig = self._sign("client_secret_abc", body)
+        assert adapter._verify_signature(body, sig)
+
+
+# ---------------------------------------------------------------------------
+# 9. Env enablement
 # ---------------------------------------------------------------------------
 
 class TestEnvEnablement:
