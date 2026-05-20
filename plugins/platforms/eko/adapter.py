@@ -493,3 +493,76 @@ class EkoAdapter(BasePlatformAdapter):
         if not uid:
             return False
         return uid in self.allowed_users
+
+    # ------------------------------------------------------------------
+    # Outbound send (text)
+    # ------------------------------------------------------------------
+
+    async def send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        if not self._client:
+            return SendResult(success=False, error="Eko adapter not connected")
+
+        # Try reply token first, fall back to push.
+        token, used_reply = self._consume_reply_token(chat_id)
+        if used_reply:
+            try:
+                await self._client.reply_text(token, content)
+                return SendResult(success=True, message_id=token)
+            except RuntimeError as exc:
+                if "401" in str(exc):
+                    # Token expired or invalid - retry with fresh auth + push.
+                    try:
+                        await self._client.push_text(chat_id, content)
+                        return SendResult(success=True, message_id=None)
+                    except Exception as exc2:
+                        logger.error("Eko: push after 401 failed: %s", exc2)
+                        return SendResult(success=False, error=str(exc2))
+                logger.info(
+                    "Eko: reply token rejected (%s); falling back to push", exc
+                )
+                # Fall through to push.
+
+        try:
+            await self._client.push_text(chat_id, content)
+            return SendResult(success=True, message_id=None)
+        except RuntimeError as exc:
+            if "401" in str(exc):
+                # Retry once with fresh token.
+                try:
+                    await self._client.push_text(chat_id, content)
+                    return SendResult(success=True, message_id=None)
+                except Exception as exc2:
+                    return SendResult(success=False, error=str(exc2))
+            logger.error("Eko: push send failed: %s", exc)
+            return SendResult(success=False, error=str(exc), retryable=True)
+        except Exception as exc:
+            logger.error("Eko: send failed: %s", exc)
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    def _consume_reply_token(self, chat_id: str) -> Tuple[str, bool]:
+        """Consume a stashed reply token if present and unexpired.
+
+        Returns ``(token, used_reply)``.
+        """
+        entry = self._reply_tokens.pop(chat_id, None)
+        if not entry:
+            return "", False
+        token, expires_at = entry
+        if not token or time.time() >= expires_at:
+            return "", False
+        return token, True
+
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
+        """No-op - Eko has no documented typing indicator API."""
+
+    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+        return {"name": chat_id or "", "type": "dm"}
+
+    def format_message(self, content: str) -> str:
+        return content
