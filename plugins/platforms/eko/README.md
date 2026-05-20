@@ -151,10 +151,34 @@ When the token is absent or expired, the adapter falls back to the push API.
 - Cron/notification delivery via `EKO_HOME_CHANNEL`
 - Interactive setup wizard
 
-## Not Yet Supported
+## Roadmap
 
-- Group chat messaging
-- Image/file sending and receiving
-- Quick reply buttons
-- Webhook signature verification (Eko API does not document one)
-- Typing indicators
+### High priority
+
+| Feature | Description | Eko API |
+|---------|-------------|---------|
+| Image/file receiving | Download inbound images/files, cache locally, surface to agent vision tool | `GET /bot/v1/message/{id}/content` (unverified) |
+| Image/file sending | Upload images via `/bot/v1/direct/picture`, files via `/bot/v1/direct/file` | ✅ documented |
+| Group chat support | Route group messages with `gid`/`tid`, group allowlist, `send_image`/`send_document` to groups | ✅ documented |
+
+### Medium priority
+
+| Feature | Description | Notes |
+|---------|-------------|-------|
+| Webhook signature verification | Authenticate incoming webhooks | Eko API does not document a signature header — verify with Eko support |
+| Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
+| Message length limits | Determine Eko's max message size, chunk long responses | Currently untested — responses may truncate |
+
+### Low priority
+
+| Feature | Description | Notes |
+|---------|-------------|-------|
+| Connection pooling | Reuse `aiohttp.ClientSession` across requests | Current pattern creates one per request (matches LINE adapter) |
+| Typing indicator | Show agent-is-working feedback | Eko may not have a typing API — needs investigation |
+| Markdown formatting | Test if Eko renders any formatting, adjust `format_message()` | Currently passes text through as-is |
+
+### Maintenance
+
+- [ ] Run test suite: `pytest tests/gateway/test_eko_plugin.py`
+- [ ] Tune reply token TTL (current default: 50s — verify against actual Eko TTL)
+- [ ] Test OAuth token TTL handling (refresh before expiry)
