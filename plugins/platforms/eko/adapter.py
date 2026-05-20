@@ -281,6 +281,8 @@ class EkoAdapter(BasePlatformAdapter):
         self._site = None  # aiohttp.web.TCPSite
         self._reply_tokens: Dict[str, Tuple[str, float]] = {}  # chat_id -> (token, expiry)
         self._dedup = _MessageDeduplicator()
+        # Reserved for future self-message filtering if Eko provides
+        # a bot identity API.
         self._bot_user_id: Optional[str] = None
 
     # ------------------------------------------------------------------
