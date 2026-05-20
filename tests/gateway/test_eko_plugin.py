@@ -416,3 +416,71 @@ class TestEnvEnablement:
             assert result["port"] == 9999
             assert result["host"] == "127.0.0.1"
             assert result["home_channel"] == "user_123"
+
+
+# ---------------------------------------------------------------------------
+# 10. fetch_picture
+# ---------------------------------------------------------------------------
+
+def _make_eko_client(
+    base_url: str = "https://test.ekoapp.com",
+    token: str = "tok_abc",
+) -> _EkoClient:
+    """Create a bare _EkoClient with a pre-set valid token."""
+    client = _EkoClient.__new__(_EkoClient)
+    client._base_url = base_url
+    client._access_token = token
+    client._token_expires_at = time.time() + 3600
+    client._timeout = 15.0
+    client._client_id = "test_id"
+    client._client_secret = "test_secret"
+    return client
+
+
+def _mock_aiohttp_for_fetch(status: int, body: bytes = b"") -> MagicMock:
+    """Build a mock aiohttp module that stubs ClientSession + GET."""
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.read = AsyncMock(return_value=body)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_aiohttp = MagicMock()
+    mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
+    mock_aiohttp.ClientTimeout = MagicMock()
+    return mock_aiohttp
+
+
+class TestFetchPicture:
+
+    @pytest.mark.asyncio
+    async def test_fetch_picture_returns_bytes(self):
+        image_data = b"\x89PNG\r\n\x1a\n"
+        mock_aiohttp = _mock_aiohttp_for_fetch(200, image_data)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            result = await client.fetch_picture("pic123")
+
+        assert result == image_data
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.get.assert_called_once_with(
+            "https://test.ekoapp.com/file/view/pic123?size=large",
+            headers={"Authorization": "Bearer tok_abc"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_picture_401_raises_auth_error(self):
+        mock_aiohttp = _mock_aiohttp_for_fetch(401)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(_EkoAuthError):
+                await client.fetch_picture("pic456")
+
+        assert client._access_token is None

@@ -223,6 +223,31 @@ class _EkoClient:
                         f"Eko push failed ({resp.status}): {body[:200]}"
                     )
 
+    async def fetch_picture(self, picture_id: str) -> bytes:
+        """Download an inbound picture from Eko by picture ID.
+
+        GETs ``/file/view/{picture_id}?size=large`` with Bearer auth and
+        returns the raw image bytes.
+        """
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/file/view/{picture_id}?size=large"
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(
+                url, headers=self._auth_headers(token)
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError("Eko API returned 401 Unauthorized")
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko fetch picture failed ({resp.status}): {body[:200]}"
+                    )
+                return await resp.read()
+
 
 # ---------------------------------------------------------------------------
 # Adapter
