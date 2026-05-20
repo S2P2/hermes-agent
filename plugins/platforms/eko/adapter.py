@@ -22,15 +22,12 @@ the request is retried once with a fresh token.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +38,6 @@ from gateway.platforms.base import (
     SendResult,
 )
 from gateway.config import Platform
-from gateway.session import SessionSource
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -97,6 +93,10 @@ class _MessageDeduplicator:
 # ---------------------------------------------------------------------------
 # OAuth2 HTTP client
 # ---------------------------------------------------------------------------
+
+
+class _EkoAuthError(RuntimeError):
+    """Raised when the Eko API returns a 401 Unauthorized response."""
 
 class _EkoClient:
     """Thin async wrapper around the Eko Messaging API with OAuth2 management.
@@ -184,7 +184,7 @@ class _EkoClient:
             ) as resp:
                 if resp.status == 401:
                     self.clear_token()
-                    raise RuntimeError("Eko API returned 401 Unauthorized")
+                    raise _EkoAuthError("Eko API returned 401 Unauthorized")
                 if resp.status >= 400:
                     body = await resp.text()
                     raise RuntimeError(
@@ -210,7 +210,7 @@ class _EkoClient:
             ) as resp:
                 if resp.status == 401:
                     self.clear_token()
-                    raise RuntimeError("Eko API returned 401 Unauthorized")
+                    raise _EkoAuthError("Eko API returned 401 Unauthorized")
                 if resp.status >= 400:
                     body = await resp.text()
                     raise RuntimeError(
@@ -399,6 +399,10 @@ class EkoAdapter(BasePlatformAdapter):
         if len(body) > WEBHOOK_BODY_MAX_BYTES:
             return web.Response(status=413, text="payload too large")
 
+        # NOTE: Eko's webhook API does not provide a signature header for
+        # request verification (unlike LINE's X-Line-Signature). If Eko adds
+        # one in the future, implement HMAC verification here. Mitigate by
+        # running behind a reverse proxy with auth or on a private network.
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -516,15 +520,15 @@ class EkoAdapter(BasePlatformAdapter):
             try:
                 await self._client.reply_text(token, content)
                 return SendResult(success=True, message_id=token)
+            except _EkoAuthError:
+                # Token expired or invalid - retry with fresh auth + push.
+                try:
+                    await self._client.push_text(chat_id, content)
+                    return SendResult(success=True, message_id=None)
+                except Exception as exc2:
+                    logger.error("Eko: push after 401 failed: %s", exc2)
+                    return SendResult(success=False, error=str(exc2))
             except RuntimeError as exc:
-                if "401" in str(exc):
-                    # Token expired or invalid - retry with fresh auth + push.
-                    try:
-                        await self._client.push_text(chat_id, content)
-                        return SendResult(success=True, message_id=None)
-                    except Exception as exc2:
-                        logger.error("Eko: push after 401 failed: %s", exc2)
-                        return SendResult(success=False, error=str(exc2))
                 logger.info(
                     "Eko: reply token rejected (%s); falling back to push", exc
                 )
@@ -533,14 +537,14 @@ class EkoAdapter(BasePlatformAdapter):
         try:
             await self._client.push_text(chat_id, content)
             return SendResult(success=True, message_id=None)
+        except _EkoAuthError:
+            # Retry once with fresh token.
+            try:
+                await self._client.push_text(chat_id, content)
+                return SendResult(success=True, message_id=None)
+            except Exception as exc2:
+                return SendResult(success=False, error=str(exc2))
         except RuntimeError as exc:
-            if "401" in str(exc):
-                # Retry once with fresh token.
-                try:
-                    await self._client.push_text(chat_id, content)
-                    return SendResult(success=True, message_id=None)
-                except Exception as exc2:
-                    return SendResult(success=False, error=str(exc2))
             logger.error("Eko: push send failed: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
         except Exception as exc:
