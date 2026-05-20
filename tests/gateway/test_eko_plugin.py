@@ -484,3 +484,82 @@ class TestFetchPicture:
                 await client.fetch_picture("pic456")
 
         assert client._access_token is None
+
+
+# ---------------------------------------------------------------------------
+# 11. push_picture / reply_picture / push_file
+# ---------------------------------------------------------------------------
+
+
+def _mock_aiohttp_for_post(status: int) -> MagicMock:
+    """Build a mock aiohttp module that stubs ClientSession + POST."""
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.text = AsyncMock(return_value="error body")
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_aiohttp = MagicMock()
+    mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
+    mock_aiohttp.ClientTimeout = MagicMock()
+    mock_aiohttp.FormData = MagicMock()
+    return mock_aiohttp
+
+
+class TestEkoClientOutboundMedia:
+
+    @pytest.mark.asyncio
+    async def test_push_picture_sends_multipart(self):
+        mock_aiohttp = _mock_aiohttp_for_post(200)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            await client.push_picture("user1", b"imgdata", "photo.png")
+
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/direct/picture")
+
+    @pytest.mark.asyncio
+    async def test_reply_picture_sends_multipart(self):
+        mock_aiohttp = _mock_aiohttp_for_post(200)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            await client.reply_picture("reply_tok", b"imgdata", "photo.png")
+
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/message/picture")
+
+    @pytest.mark.asyncio
+    async def test_push_file_sends_multipart(self):
+        mock_aiohttp = _mock_aiohttp_for_post(200)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            await client.push_file("user1", b"filedata", "doc.pdf")
+
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/direct/file")
+
+    @pytest.mark.asyncio
+    async def test_push_picture_401_raises_auth_error(self):
+        mock_aiohttp = _mock_aiohttp_for_post(401)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(_EkoAuthError):
+                await client.push_picture("user1", b"imgdata", "photo.png")
+
+        assert client._access_token is None
+        assert client._token_expires_at == 0.0

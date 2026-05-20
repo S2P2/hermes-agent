@@ -248,6 +248,114 @@ class _EkoClient:
                     )
                 return await resp.read()
 
+    async def push_picture(
+        self,
+        uid: str,
+        file_bytes: bytes,
+        filename: str,
+        caption: str = "",
+    ) -> None:
+        """Push an image to a user by uid via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/direct/picture"
+        data = aiohttp.FormData()
+        data.add_field("uid", uid)
+        if caption:
+            data.add_field("caption", caption)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko push picture returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko push picture failed ({resp.status}): {body[:200]}"
+                    )
+
+    async def reply_picture(
+        self,
+        reply_token: str,
+        file_bytes: bytes,
+        filename: str,
+    ) -> None:
+        """Reply with an image using a reply token via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/message/picture"
+        data = aiohttp.FormData()
+        data.add_field("replyToken", reply_token)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko reply picture returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko reply picture failed ({resp.status}): {body[:200]}"
+                    )
+
+    async def push_file(
+        self,
+        uid: str,
+        file_bytes: bytes,
+        filename: str,
+    ) -> None:
+        """Push a file to a user by uid via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/direct/file"
+        data = aiohttp.FormData()
+        data.add_field("uid", uid)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko push file returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko push file failed ({resp.status}): {body[:200]}"
+                    )
+
 
 # ---------------------------------------------------------------------------
 # Adapter
