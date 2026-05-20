@@ -1,0 +1,53 @@
+name: eko-platform
+label: Eko
+kind: platform
+version: 1.0.0
+description: >
+  Eko Messaging API gateway adapter for Hermes Agent.
+  Runs an aiohttp webhook server that receives Eko webhook events
+  and relays messages between Eko users and the Hermes agent.
+  Outbound replies prefer the reply token endpoint and fall back
+  to the push API when the token has expired or is absent.
+author: Hermes Agent contributors
+requires_env:
+  - name: EKO_BASE_URL
+    description: "Eko server base URL (e.g. https://customer-h1.ekoapp.com)"
+    prompt: "Eko base URL"
+    password: false
+  - name: EKO_OAUTH_CLIENT_ID
+    description: "Bot OAuth client ID from Eko admin panel"
+    prompt: "OAuth client ID"
+    password: false
+  - name: EKO_OAUTH_CLIENT_SECRET
+    description: "Bot OAuth client secret from Eko admin panel"
+    prompt: "OAuth client secret"
+    password: true
+optional_env:
+  - name: EKO_PORT
+    description: "Webhook listen port (default: 8647)"
+    prompt: "Webhook port"
+    password: false
+  - name: EKO_HOST
+    description: "Webhook bind host (default: 0.0.0.0)"
+    prompt: "Webhook host"
+    password: false
+  - name: EKO_WEBHOOK_PATH
+    description: "Webhook endpoint path (default: /eko/webhook)"
+    prompt: "Webhook path"
+    password: false
+  - name: EKO_ALLOWED_USERS
+    description: "Comma-separated Eko user IDs allowed to DM the bot"
+    prompt: "Allowed user IDs (comma-separated)"
+    password: false
+  - name: EKO_ALLOW_ALL_USERS
+    description: "Allow any Eko user to talk to the bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: EKO_HOME_CHANNEL
+    description: "Default user ID for cron / notification delivery"
+    prompt: "Home channel ID (or empty)"
+    password: false
+  - name: EKO_REPLY_TOKEN_TTL
+    description: "Reply-token TTL in seconds (default: 50)"
+    prompt: "Reply token TTL (seconds)"
+    password: false
