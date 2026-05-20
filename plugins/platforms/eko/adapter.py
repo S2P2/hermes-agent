@@ -566,3 +566,162 @@ class EkoAdapter(BasePlatformAdapter):
 
     def format_message(self, content: str) -> str:
         return content
+
+
+# ---------------------------------------------------------------------------
+# Plugin entry-point hooks
+# ---------------------------------------------------------------------------
+
+def check_requirements() -> bool:
+    """Plugin gate: require credentials AND aiohttp at runtime."""
+    if not os.getenv("EKO_BASE_URL"):
+        return False
+    if not os.getenv("EKO_OAUTH_CLIENT_ID"):
+        return False
+    if not os.getenv("EKO_OAUTH_CLIENT_SECRET"):
+        return False
+    try:
+        import aiohttp  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def validate_config(config) -> bool:
+    extra = getattr(config, "extra", {}) or {}
+    has_url = bool(os.getenv("EKO_BASE_URL") or extra.get("base_url"))
+    has_id = bool(
+        os.getenv("EKO_OAUTH_CLIENT_ID") or extra.get("oauth_client_id")
+    )
+    has_secret = bool(
+        os.getenv("EKO_OAUTH_CLIENT_SECRET") or extra.get("oauth_client_secret")
+    )
+    return has_url and has_id and has_secret
+
+
+def is_connected(config) -> bool:
+    """Surface in ``hermes status`` even before the adapter is instantiated."""
+    return validate_config(config)
+
+
+def _env_enablement() -> Optional[Dict[str, Any]]:
+    """Auto-seed PlatformConfig.extra from env-only setups."""
+    if not (
+        os.getenv("EKO_BASE_URL")
+        and os.getenv("EKO_OAUTH_CLIENT_ID")
+        and os.getenv("EKO_OAUTH_CLIENT_SECRET")
+    ):
+        return None
+    seeded: Dict[str, Any] = {}
+    if os.getenv("EKO_PORT"):
+        try:
+            seeded["port"] = int(os.environ["EKO_PORT"])
+        except ValueError:
+            pass
+    if os.getenv("EKO_HOST"):
+        seeded["host"] = os.environ["EKO_HOST"]
+    if os.getenv("EKO_WEBHOOK_PATH"):
+        seeded["webhook_path"] = os.environ["EKO_WEBHOOK_PATH"]
+    if os.getenv("EKO_HOME_CHANNEL"):
+        seeded["home_channel"] = os.environ["EKO_HOME_CHANNEL"]
+    return seeded or {}
+
+
+async def _standalone_send(
+    pconfig,
+    chat_id: str,
+    message: str,
+    *,
+    thread_id: Optional[str] = None,
+    media_files: Optional[List[str]] = None,
+    force_document: bool = False,
+) -> Dict[str, Any]:
+    """Out-of-process push delivery for cron jobs running detached from the gateway."""
+    extra = getattr(pconfig, "extra", {}) or {}
+    base_url = os.getenv("EKO_BASE_URL") or extra.get("base_url", "")
+    client_id = os.getenv("EKO_OAUTH_CLIENT_ID") or extra.get("oauth_client_id", "")
+    client_secret = os.getenv("EKO_OAUTH_CLIENT_SECRET") or extra.get("oauth_client_secret", "")
+    if not base_url or not client_id or not client_secret or not chat_id:
+        return {"error": "Eko standalone send: missing config or chat_id"}
+
+    client = _EkoClient(base_url, client_id, client_secret)
+    try:
+        await client.push_text(chat_id, message)
+        return {"success": True, "message_id": None}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def interactive_setup() -> None:
+    """Minimal stdin wizard for ``hermes setup eko``."""
+    print()
+    print("Eko Messaging API setup")
+    print("-----------------------")
+    print("Create a Webhook API bot at your Eko admin panel,")
+    print("then copy the values below.")
+    print()
+
+    try:
+        from hermes_cli.config import get_env_var, set_env_var
+    except ImportError:
+        print(
+            "hermes_cli.config not available; "
+            "set EKO_* vars manually in ~/.hermes/.env"
+        )
+        return
+
+    def _prompt(var: str, prompt: str, *, secret: bool = False) -> None:
+        existing = get_env_var(var) if callable(get_env_var) else None
+        suffix = " [keep current]" if existing else ""
+        try:
+            if secret:
+                import getpass
+                value = getpass.getpass(f"{prompt}{suffix}: ")
+            else:
+                value = input(f"{prompt}{suffix}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if value:
+            set_env_var(var, value)
+
+    _prompt("EKO_BASE_URL", "Eko base URL (e.g. https://customer-h1.ekoapp.com)")
+    _prompt("EKO_OAUTH_CLIENT_ID", "OAuth client ID")
+    _prompt("EKO_OAUTH_CLIENT_SECRET", "OAuth client secret", secret=True)
+    _prompt("EKO_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)")
+    print(
+        "Done. Set the webhook URL in the Eko admin panel to "
+        "<your-public-url>/eko/webhook"
+    )
+
+
+def register(ctx) -> None:
+    """Plugin entry point - called by the Hermes plugin system at startup."""
+    ctx.register_platform(
+        name="eko",
+        label="Eko",
+        adapter_factory=lambda cfg: EkoAdapter(cfg),
+        check_fn=check_requirements,
+        validate_config=validate_config,
+        is_connected=is_connected,
+        required_env=[
+            "EKO_BASE_URL",
+            "EKO_OAUTH_CLIENT_ID",
+            "EKO_OAUTH_CLIENT_SECRET",
+        ],
+        install_hint="pip install aiohttp",
+        setup_fn=interactive_setup,
+        env_enablement_fn=_env_enablement,
+        cron_deliver_env_var="EKO_HOME_CHANNEL",
+        standalone_sender_fn=_standalone_send,
+        allowed_users_env="EKO_ALLOWED_USERS",
+        allow_all_env="EKO_ALLOW_ALL_USERS",
+        emoji="💬",
+        pii_safe=False,
+        allow_update_command=True,
+        platform_hint=(
+            "You are chatting via Eko Messaging API. Messages are plain text. "
+            "Keep responses concise and well-structured. "
+            "Media support (images, files) is not yet available."
+        ),
+    )
