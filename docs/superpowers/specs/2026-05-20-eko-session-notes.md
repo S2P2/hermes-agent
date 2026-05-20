@@ -21,10 +21,10 @@
 - **Plugin form** (not built-in) — lives at `plugins/platforms/eko/`, zero core code changes
 - **Configurable base URL** — Eko uses customer-specific hostnames (e.g. `customer-h1.ekoapp.com`)
 - **Reply token TTL** — defaulted to 50s (conservative), needs tuning after testing with real Eko
-- **No webhook signature verification** — Eko API doesn't document one. Added comment in code.
+- **Webhook signature verification** — **Done (branch: `feat/eko-webhook-signature`)**. Header is `X-Eko-Signature` (not `x-amity-signature` — that's Amity Social Cloud, a different product). Algorithm: HMAC-SHA256 of raw body, Base64-encoded, keyed by the OAuth client secret. Live-confirmed 2026-05-21.
 - **No slow-LLM postback** — Eko has no template button API equivalent (quick reply exists but deferred)
 - **401 handling** — dedicated `_EkoAuthError` exception class, not string matching
-- **`_bot_user_id`** — reserved but never set (Eko doesn't provide a bot identity API)
+- **`_bot_user_id`** — can now be populated from `meta.botId` in webhook events (live-confirmed 2026-05-21)
 
 ## Repo Setup
 
@@ -49,10 +49,12 @@ Default PR repo → S2P2/hermes-agent
 ## Next Steps (see README roadmap)
 
 1. **Image/file receiving + sending** — biggest v2 feature
-2. **Group chat support** — Eko API supports it
-3. **Webhook signature verification** — check with Eko support
+2. **Group chat support** — Eko API supports it; real payload has `groupType`, `groupId`, `topicId`
+3. ~~**Webhook signature verification**~~ **Done (branch: `feat/eko-webhook-signature`)**
 4. Run `pytest tests/gateway/test_eko_plugin.py` to validate tests
 5. Tune reply token TTL
+6. **Populate `_bot_user_id`** from `meta.botId` — enables self-message filtering
+7. **Use `sessionId`** for Hermes session grouping (format: `{groupId}_{topicId}`)
 
 ## Eko API Quirks
 
@@ -61,3 +63,18 @@ Default PR repo → S2P2/hermes-agent
 - Source can use `userId` or `uid` depending on event type
 - Reply endpoint uses multipart/form-data
 - Push endpoint uses JSON
+- **Webhook signature**: `X-Eko-Signature` header, HMAC-SHA256-Base64, key = OAuth client secret (live-confirmed)
+- **Webhook user-agent**: `axios/0.19.2` — useful for identifying Eko traffic in proxy logs
+
+## Real Webhook Payload — Undocumented Fields (live-captured 2026-05-21)
+
+| Field | Path | Notes |
+|-------|------|-------|
+| `source.email` | event.source | Always present, may be empty |
+| `source.profile` | event.source | User profile fields (FullName, Division, Department, TH names) |
+| `meta` | event | Contains `botId`, `networkId`, `clientId`, `userId` (bot operator) |
+| `meta.deep_research` | event.meta | Boolean flag — purpose unknown, always `false` so far |
+| `message.groupId` | event.message | Chat/conversation ID — useful for group chat routing |
+| `message.groupType` | event.message | `"direct_chat"` for DMs, likely `"group_chat"` for groups |
+| `message.topicId` | event.message | Topic (thread) within the group |
+| `sessionId` | event | Composite `{groupId}_{topicId}` — natural Hermes session key |

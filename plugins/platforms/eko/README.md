@@ -165,7 +165,6 @@ When the token is absent or expired, the adapter falls back to the push API.
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Webhook signature verification | Authenticate incoming webhooks | Eko API does not document a signature header — verify with Eko support |
 | Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
 | Message length limits | Determine Eko's max message size, chunk long responses | Currently untested — responses may truncate |
 
