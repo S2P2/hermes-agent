@@ -17,7 +17,7 @@ proactively refreshed before expiry. On 401, the token is cleared and
 the request is retried once with a fresh token.
 
 **Webhook signature verification.** Inbound webhook requests are verified
-via the ``x-amity-signature`` header (HMAC-SHA256 of the raw body, Base64-
+via the ``X-Eko-Signature`` header (HMAC-SHA256 of the raw body, Base64-
 encoded, keyed by the OAuth client secret). If the header is present but
 the signature doesn't match, the request is rejected with 403.
 
@@ -405,17 +405,17 @@ class EkoAdapter(BasePlatformAdapter):
         if len(body) > WEBHOOK_BODY_MAX_BYTES:
             return web.Response(status=413, text="payload too large")
 
-        # Verify x-amity-signature (HMAC-SHA256 of raw body, Base64-encoded,
+        # Verify X-Eko-Signature (HMAC-SHA256 of raw body, Base64-encoded,
         # keyed by the OAuth client secret). Reject if signature is present
-        # but doesn't match; allow through if header is absent (older Eko
-        # deployments or proxied setups that strip it).
-        sig_header = request.headers.get("x-amity-signature")
+        # but doesn't match; allow through if header is absent (proxied
+        # setups that strip it).
+        sig_header = request.headers.get("x-eko-signature")
         if sig_header:
             if not self._verify_signature(body, sig_header):
-                logger.warning("Eko: invalid x-amity-signature — rejecting webhook")
+                logger.warning("Eko: invalid X-Eko-Signature — rejecting webhook")
                 return web.Response(status=403, text="invalid signature")
         else:
-            logger.debug("Eko: no x-amity-signature header — skipping verification")
+            logger.debug("Eko: no X-Eko-Signature header — skipping verification")
 
         try:
             payload = json.loads(body.decode("utf-8"))
@@ -579,7 +579,7 @@ class EkoAdapter(BasePlatformAdapter):
         return token, True
 
     def _verify_signature(self, body: bytes, signature: str) -> bool:
-        """Verify x-amity-signature HMAC-SHA256-Base64 digest.
+        """Verify X-Eko-Signature HMAC-SHA256-Base64 digest.
 
         Eko signs webhook payloads with HMAC-SHA256 using the OAuth client
         secret as the key, and Base64-encodes the digest.

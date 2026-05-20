@@ -8,7 +8,7 @@ Covers:
 5. Outbound send routing (reply → push fallback, 401 retry)
 6. Plugin registration metadata
 7. Config validation and env enablement
-8. Webhook signature verification (x-amity-signature HMAC-SHA256-Base64)
+8. Webhook signature verification (X-Eko-Signature HMAC-SHA256-Base64)
 """
 
 from __future__ import annotations
