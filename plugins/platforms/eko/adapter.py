@@ -223,6 +223,139 @@ class _EkoClient:
                         f"Eko push failed ({resp.status}): {body[:200]}"
                     )
 
+    async def fetch_picture(self, picture_id: str) -> bytes:
+        """Download an inbound picture from Eko by picture ID.
+
+        GETs ``/file/view/{picture_id}?size=large`` with Bearer auth and
+        returns the raw image bytes.
+        """
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/file/view/{picture_id}?size=large"
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(
+                url, headers=self._auth_headers(token)
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError("Eko API returned 401 Unauthorized")
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko fetch picture failed ({resp.status}): {body[:200]}"
+                    )
+                return await resp.read()
+
+    async def push_picture(
+        self,
+        uid: str,
+        file_bytes: bytes,
+        filename: str,
+        caption: str = "",
+    ) -> None:
+        """Push an image to a user by uid via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/direct/picture"
+        data = aiohttp.FormData()
+        data.add_field("uid", uid)
+        if caption:
+            data.add_field("caption", caption)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko push picture returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko push picture failed ({resp.status}): {body[:200]}"
+                    )
+
+    async def reply_picture(
+        self,
+        reply_token: str,
+        file_bytes: bytes,
+        filename: str,
+    ) -> None:
+        """Reply with an image using a reply token via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/message/picture"
+        data = aiohttp.FormData()
+        data.add_field("replyToken", reply_token)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko reply picture returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko reply picture failed ({resp.status}): {body[:200]}"
+                    )
+
+    async def push_file(
+        self,
+        uid: str,
+        file_bytes: bytes,
+        filename: str,
+    ) -> None:
+        """Push a file to a user by uid via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/direct/file"
+        data = aiohttp.FormData()
+        data.add_field("uid", uid)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko push file returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko push file failed ({resp.status}): {body[:200]}"
+                    )
+
 
 # ---------------------------------------------------------------------------
 # Adapter
@@ -464,8 +597,6 @@ class EkoAdapter(BasePlatformAdapter):
         reply_token = event.get("replyToken", "")
         source = event.get("source") or {}
 
-        # Eko source: {"type": "user", "userId": "...", "username": "..."}
-        # or {"type": "direct_chat", "uid": "..."}
         uid = source.get("userId") or source.get("uid", "")
         username = source.get("username", "") or uid
 
@@ -476,12 +607,23 @@ class EkoAdapter(BasePlatformAdapter):
                 time.time() + self.reply_token_ttl,
             )
 
-        # Extract text.
+        # Media attachments (downloaded and cached locally).
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        text = ""
+        message_type = MessageType.TEXT
+
         if msg_type == "text":
             text = msg.get("text", "") or ""
-        elif msg_type == "image":
-            # Media support deferred - surface a placeholder.
+        elif msg_type == "picture":
+            local_path = await self._download_picture(msg)
+            if local_path:
+                media_urls.append(local_path)
+                media_types.append(self._mime_from_filename(msg.get("fileName", "")))
+                message_type = MessageType.PHOTO
             text = "[image]"
+        elif msg_type == "sticker":
+            text = "[sticker]"
         elif msg_type == "file":
             text = "[file]"
         else:
@@ -497,13 +639,56 @@ class EkoAdapter(BasePlatformAdapter):
 
         event_obj = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT,
+            message_type=message_type,
             source=source_obj,
             raw_message=event,
             message_id=message_id,
+            media_urls=media_urls,
+            media_types=media_types,
         )
 
         await self.handle_message(event_obj)
+
+    async def _download_picture(self, msg: Dict[str, Any]) -> Optional[str]:
+        """Download an inbound picture and cache it locally.
+
+        Returns the cached file path, or None on failure.
+        """
+        picture_id = msg.get("pictureId", "")
+        if not picture_id or not self._client:
+            return None
+        try:
+            data = await self._client.fetch_picture(picture_id)
+        except Exception as exc:
+            logger.warning("Eko: failed to download picture %s: %s", picture_id, exc)
+            return None
+        ext = self._ext_from_filename(msg.get("fileName", ""), default=".jpg")
+        try:
+            from gateway.platforms.base import cache_image_from_bytes
+            return cache_image_from_bytes(data, ext=ext)
+        except Exception as exc:
+            logger.warning("Eko: failed to cache picture %s: %s", picture_id, exc)
+            return None
+
+    @staticmethod
+    def _ext_from_filename(filename: str, default: str = ".bin") -> str:
+        """Extract extension from a filename, with a fallback."""
+        if filename and "." in filename:
+            ext = "." + filename.rsplit(".", 1)[-1].lower()
+            return ext if len(ext) <= 10 else default
+        return default
+
+    @staticmethod
+    def _mime_from_filename(filename: str) -> str:
+        """Guess MIME type from filename extension."""
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        return {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "webp": "image/webp",
+        }.get(ext, "image/jpeg")
 
     def _allowed_for_source(self, source: Dict[str, Any]) -> bool:
         """Check if the source user is in the allowlist."""
@@ -563,6 +748,130 @@ class EkoAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc), retryable=True)
         except Exception as exc:
             logger.error("Eko: send failed: %s", exc)
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    # ------------------------------------------------------------------
+    # Outbound send (images and files)
+    # ------------------------------------------------------------------
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image file to an Eko user."""
+        if not self._client:
+            return SendResult(success=False, error="Eko adapter not connected")
+
+        from pathlib import Path
+
+        try:
+            file_bytes = Path(image_path).read_bytes()
+        except OSError as exc:
+            return SendResult(success=False, error=f"Cannot read image: {exc}")
+
+        filename = Path(image_path).name or "image.jpg"
+
+        # Try reply token first, fall back to push.
+        token, used_reply = self._consume_reply_token(chat_id)
+        if used_reply:
+            try:
+                await self._client.reply_picture(token, file_bytes, filename)
+                return SendResult(success=True, message_id=token)
+            except _EkoAuthError:
+                try:
+                    await self._client.push_picture(
+                        chat_id, file_bytes, filename, caption=caption or ""
+                    )
+                    return SendResult(success=True, message_id=None)
+                except Exception as exc2:
+                    return SendResult(success=False, error=str(exc2))
+            except RuntimeError as exc:
+                logger.info("Eko: reply picture rejected (%s); falling back to push", exc)
+
+        try:
+            await self._client.push_picture(
+                chat_id, file_bytes, filename, caption=caption or ""
+            )
+            return SendResult(success=True, message_id=None)
+        except _EkoAuthError:
+            try:
+                await self._client.push_picture(
+                    chat_id, file_bytes, filename, caption=caption or ""
+                )
+                return SendResult(success=True, message_id=None)
+            except Exception as exc2:
+                return SendResult(success=False, error=str(exc2))
+        except RuntimeError as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an image from a URL to an Eko user.
+
+        Downloads the image to a local cache first, then delegates to
+        send_image_file for native delivery.
+        """
+        try:
+            from gateway.platforms.base import cache_image_from_url
+
+            local_path = await cache_image_from_url(image_url)
+        except Exception as exc:
+            logger.warning("Eko: failed to download image URL: %s", exc)
+            return SendResult(success=False, error=f"Cannot download image: {exc}")
+
+        return await self.send_image_file(
+            chat_id, local_path, caption=caption, reply_to=reply_to, metadata=metadata
+        )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a file/document to an Eko user."""
+        if not self._client:
+            return SendResult(success=False, error="Eko adapter not connected")
+
+        from pathlib import Path
+
+        try:
+            file_bytes = Path(file_path).read_bytes()
+        except OSError as exc:
+            return SendResult(success=False, error=f"Cannot read file: {exc}")
+
+        filename = file_name or Path(file_path).name or "document"
+
+        # No reply-token endpoint documented for files — always push.
+        try:
+            await self._client.push_file(chat_id, file_bytes, filename)
+            return SendResult(success=True, message_id=None)
+        except _EkoAuthError:
+            try:
+                await self._client.push_file(chat_id, file_bytes, filename)
+                return SendResult(success=True, message_id=None)
+            except Exception as exc2:
+                return SendResult(success=False, error=str(exc2))
+        except RuntimeError as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+        except Exception as exc:
             return SendResult(success=False, error=str(exc), retryable=True)
 
     def _consume_reply_token(self, chat_id: str) -> Tuple[str, bool]:

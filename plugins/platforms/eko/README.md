@@ -13,6 +13,10 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 - User allowlist gating
 - Cron/notification delivery
 - Interactive setup wizard (`hermes gateway setup`)
+- Webhook signature verification (`X-Eko-Signature` HMAC-SHA256)
+- Image receiving (download, cache, vision tool integration)
+- Image sending (reply token + push fallback)
+- File sending (push to user)
 
 ## Prerequisites
 
@@ -141,6 +145,14 @@ When the token is absent or expired, the adapter falls back to the push API.
 
 ## Version History
 
+### v1.1.0
+
+- Webhook signature verification via `X-Eko-Signature` (HMAC-SHA256-Base64)
+- Image receiving: download inbound pictures, cache locally, vision tool integration
+- Image sending: native multipart upload with reply token + push fallback
+- File sending: push files to users via multipart upload
+- Sticker webhook events: surface `[sticker]` placeholder
+
 ### v1.0.0
 
 - 1:1 direct message text support
@@ -156,9 +168,7 @@ When the token is absent or expired, the adapter falls back to the push API.
 ### High priority
 
 | Feature | Description | Eko API |
-|---------|-------------|---------|
-| Image/file receiving | Download inbound images/files, cache locally, surface to agent vision tool | `GET /bot/v1/message/{id}/content` (unverified) |
-| Image/file sending | Upload images via `/bot/v1/direct/picture`, files via `/bot/v1/direct/file` | ✅ documented |
+|---------|-------------|--------|
 | Group chat support | Route group messages with `gid`/`tid`, group allowlist, `send_image`/`send_document` to groups | ✅ documented |
 
 ### Medium priority

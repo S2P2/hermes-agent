@@ -25,6 +25,9 @@ import pytest
 
 from tests.gateway._plugin_adapter_loader import load_plugin_adapter
 
+from gateway.config import Platform
+from gateway.platforms.base import MessageType
+
 _eko = load_plugin_adapter("eko")
 
 EkoAdapter = _eko.EkoAdapter
@@ -416,3 +419,345 @@ class TestEnvEnablement:
             assert result["port"] == 9999
             assert result["host"] == "127.0.0.1"
             assert result["home_channel"] == "user_123"
+
+
+# ---------------------------------------------------------------------------
+# 10. fetch_picture
+# ---------------------------------------------------------------------------
+
+def _make_eko_client(
+    base_url: str = "https://test.ekoapp.com",
+    token: str = "tok_abc",
+) -> _EkoClient:
+    """Create a bare _EkoClient with a pre-set valid token."""
+    client = _EkoClient.__new__(_EkoClient)
+    client._base_url = base_url
+    client._access_token = token
+    client._token_expires_at = time.time() + 3600
+    client._timeout = 15.0
+    client._client_id = "test_id"
+    client._client_secret = "test_secret"
+    return client
+
+
+def _mock_aiohttp_for_fetch(status: int, body: bytes = b"") -> MagicMock:
+    """Build a mock aiohttp module that stubs ClientSession + GET."""
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.read = AsyncMock(return_value=body)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_aiohttp = MagicMock()
+    mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
+    mock_aiohttp.ClientTimeout = MagicMock()
+    return mock_aiohttp
+
+
+class TestFetchPicture:
+
+    @pytest.mark.asyncio
+    async def test_fetch_picture_returns_bytes(self):
+        image_data = b"\x89PNG\r\n\x1a\n"
+        mock_aiohttp = _mock_aiohttp_for_fetch(200, image_data)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            result = await client.fetch_picture("pic123")
+
+        assert result == image_data
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.get.assert_called_once_with(
+            "https://test.ekoapp.com/file/view/pic123?size=large",
+            headers={"Authorization": "Bearer tok_abc"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_picture_401_raises_auth_error(self):
+        mock_aiohttp = _mock_aiohttp_for_fetch(401)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(_EkoAuthError):
+                await client.fetch_picture("pic456")
+
+        assert client._access_token is None
+
+
+# ---------------------------------------------------------------------------
+# 11. push_picture / reply_picture / push_file
+# ---------------------------------------------------------------------------
+
+
+def _mock_aiohttp_for_post(status: int) -> MagicMock:
+    """Build a mock aiohttp module that stubs ClientSession + POST."""
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.text = AsyncMock(return_value="error body")
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.post = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_aiohttp = MagicMock()
+    mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
+    mock_aiohttp.ClientTimeout = MagicMock()
+    mock_aiohttp.FormData = MagicMock()
+    return mock_aiohttp
+
+
+class TestEkoClientOutboundMedia:
+
+    @pytest.mark.asyncio
+    async def test_push_picture_sends_multipart(self):
+        mock_aiohttp = _mock_aiohttp_for_post(200)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            await client.push_picture("user1", b"imgdata", "photo.png")
+
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/direct/picture")
+
+    @pytest.mark.asyncio
+    async def test_reply_picture_sends_multipart(self):
+        mock_aiohttp = _mock_aiohttp_for_post(200)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            await client.reply_picture("reply_tok", b"imgdata", "photo.png")
+
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/message/picture")
+
+    @pytest.mark.asyncio
+    async def test_push_file_sends_multipart(self):
+        mock_aiohttp = _mock_aiohttp_for_post(200)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            await client.push_file("user1", b"filedata", "doc.pdf")
+
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/direct/file")
+
+    @pytest.mark.asyncio
+    async def test_push_picture_401_raises_auth_error(self):
+        mock_aiohttp = _mock_aiohttp_for_post(401)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(_EkoAuthError):
+                await client.push_picture("user1", b"imgdata", "photo.png")
+
+        assert client._access_token is None
+        assert client._token_expires_at == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 12. Inbound picture handling
+# ---------------------------------------------------------------------------
+
+class TestInboundPicture:
+
+    @pytest.mark.asyncio
+    async def test_picture_downloads_and_caches(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._client = MagicMock()
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        adapter._client.fetch_picture = AsyncMock(return_value=fake_png)
+        adapter._reply_tokens = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+
+        event = {
+            "replyToken": "tok123",
+            "type": "message",
+            "source": {"type": "user", "userId": "user123", "username": "alice"},
+            "message": {
+                "id": "msg123",
+                "type": "picture",
+                "pictureId": "pic456",
+                "fileName": "photo.png",
+                "groupId": "g1",
+                "groupType": "direct_chat",
+                "topicId": "t1",
+            },
+            "timestamp": "2026-05-21T00:00:00.000Z",
+        }
+
+        with patch(
+            "gateway.platforms.base.cache_image_from_bytes",
+            return_value="/cache/img_abc.png",
+        ) as mock_cache:
+            await adapter._handle_message_event(event)
+
+        adapter._client.fetch_picture.assert_called_once_with("pic456")
+        mock_cache.assert_called_once_with(fake_png, ext=".png")
+
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.message_type == MessageType.PHOTO
+        assert call_args.media_urls == ["/cache/img_abc.png"]
+        assert "image/png" in call_args.media_types
+
+    @pytest.mark.asyncio
+    async def test_picture_download_failure_falls_back_to_placeholder(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._client = MagicMock()
+        adapter._client.fetch_picture = AsyncMock(
+            side_effect=RuntimeError("download failed")
+        )
+        adapter._reply_tokens = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+
+        event = {
+            "replyToken": "tok123",
+            "type": "message",
+            "source": {"type": "user", "userId": "user123", "username": "alice"},
+            "message": {
+                "id": "msg123",
+                "type": "picture",
+                "pictureId": "pic456",
+                "fileName": "photo.png",
+            },
+            "timestamp": "2026-05-21T00:00:00.000Z",
+        }
+
+        await adapter._handle_message_event(event)
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.text == "[image]"
+        assert call_args.media_urls == []
+        assert call_args.message_type == MessageType.TEXT
+
+    @pytest.mark.asyncio
+    async def test_sticker_surfaces_placeholder(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+
+        event = {
+            "replyToken": "tok123",
+            "type": "message",
+            "source": {"type": "user", "userId": "user123", "username": "alice"},
+            "message": {
+                "id": "msg_sticker",
+                "type": "sticker",
+                "packageId": "pkg1",
+                "stickerId": "stk1",
+            },
+            "timestamp": "2026-05-21T00:00:00.000Z",
+        }
+
+        await adapter._handle_message_event(event)
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.text == "[sticker]"
+
+
+# ---------------------------------------------------------------------------
+# 13. Outbound media (send_image_file, send_image, send_document)
+# ---------------------------------------------------------------------------
+
+class TestOutboundMedia:
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_uses_reply_token(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._client = MagicMock()
+        adapter._client.reply_picture = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
+            result = await adapter.send_image_file("chat1", "/fake/img.png", caption="hi")
+        assert result.success
+        adapter._client.reply_picture.assert_called_once()
+        adapter._client.push_picture.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_falls_back_to_push(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock()
+        adapter._client.push_picture = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
+            result = await adapter.send_image_file("chat1", "/fake/img.png", caption="hi")
+        assert result.success
+        adapter._client.push_picture.assert_called_once_with(
+            "chat1",
+            b"\x89PNG data",
+            "img.png",
+            caption="hi",
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_image_downloads_and_delegates(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock()
+        adapter._client.push_picture = AsyncMock()
+
+        with patch("gateway.platforms.base.cache_image_from_url", AsyncMock(return_value="/cache/img_abc.jpg")):
+            with patch("pathlib.Path.read_bytes", return_value=b"\xff\xd8\xff image data"):
+                result = await adapter.send_image("chat1", "https://example.com/img.jpg", caption="look")
+        assert result.success
+        adapter._client.push_picture.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_document_pushes_file(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock()
+        adapter._client.push_file = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"%PDF-1.4 data"):
+            result = await adapter.send_document(
+                "chat1", "/fake/report.pdf", file_name="report.pdf"
+            )
+        assert result.success
+        adapter._client.push_file.assert_called_once_with(
+            "chat1",
+            b"%PDF-1.4 data",
+            "report.pdf",
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_auth_error_retries_push(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._client = MagicMock()
+        adapter._client.reply_picture = AsyncMock(side_effect=_EkoAuthError("401"))
+        adapter._client.push_picture = AsyncMock()
+
+        with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
+            result = await adapter.send_image_file("chat1", "/fake/img.png")
+        assert result.success
+        adapter._client.push_picture.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_document_not_connected_returns_error(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._client = None
+        result = await adapter.send_document("chat1", "/fake/file.pdf")
+        assert not result.success
