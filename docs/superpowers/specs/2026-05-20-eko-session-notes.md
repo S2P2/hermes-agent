@@ -2,7 +2,7 @@
 
 ## Current State
 
-**Working:** v1.0.0 live at `S2P2/hermes-agent` — bidirectional text chat with Eko works.
+**Working:** v1.1.0 live at `S2P2/hermes-agent` — bidirectional text chat + image support with Eko.
 
 **Tested and confirmed working:**
 - Webhook receives messages from Eko
@@ -11,6 +11,16 @@
 - User allowlist (`EKO_ALLOWED_USERS`)
 - Home channel (`EKO_HOME_CHANNEL`)
 - Gateway restart notifications
+- Webhook signature verification (`X-Eko-Signature` HMAC-SHA256-Base64)
+- **Inbound image receiving** — download, cache, vision model interpretation ✅
+
+**Known issues:**
+- **Outbound image/file sending not working** — `send_image_file`/`send_image`/`send_document` are implemented and tested in unit tests, but fail in live testing. Needs investigation:
+  - Check gateway logs for error messages from `push_picture`/`push_file`
+  - Verify the multipart upload format matches what Eko expects
+  - Check if file size limits or content-type headers are causing rejections
+  - May need to test the exact curl equivalent against the real Eko API
+  - Platform hint updated but LLM may not be triggering the `MEDIA:` path correctly
 
 **Bug fixed during testing:**
 - Eko OAuth endpoint requires `application/x-www-form-urlencoded`, not JSON.
@@ -48,7 +58,7 @@ Default PR repo → S2P2/hermes-agent
 
 ## Next Steps (see README roadmap)
 
-1. ~~**Image/file receiving + sending**~~ **Done (branch: `feat/eko-image-file`)** — inbound pictures only (Eko doesn't send file webhooks)
+1. ~~**Image/file receiving + sending**~~ **Inbound done; outbound needs debugging** — inbound pictures work (vision model interprets them). Outbound `send_image_file`/`send_document` fail in live testing — needs investigation (see Known Issues above).
 2. **Group chat support** — Eko API supports it; real payload has `groupType`, `groupId`, `topicId`
 3. ~~**Webhook signature verification**~~ **Done (merged to main)**
 4. Run `pytest tests/gateway/test_eko_plugin.py` to validate tests
@@ -66,7 +76,24 @@ Default PR repo → S2P2/hermes-agent
 - **Webhook signature**: `X-Eko-Signature` header, HMAC-SHA256-Base64, key = OAuth client secret (live-confirmed)
 - **Webhook user-agent**: `axios/0.19.2` — useful for identifying Eko traffic in proxy logs
 
-## Real Webhook Payload — Undocumented Fields (live-captured 2026-05-21)
+## Eko Media — Live Testing Results (2026-05-21)
+
+**Inbound image:** ✅ Working
+- `message.type == "picture"` in webhook event
+- Download: `GET {base}/file/view/{pictureId}?size=large` with Bearer auth
+- Cache via `cache_image_from_bytes`, vision model interprets correctly
+
+**Inbound file:** ❌ No webhook event sent by Eko
+**Inbound sticker:** Webhook received with `packageId`/`stickerId`, no download API — `[sticker]` placeholder
+
+**Outbound image:** ❌ Not working in live test
+- Endpoints: `/bot/v1/direct/picture` (push), `/bot/v1/message/picture` (reply)
+- Multipart upload with `file`, `uid`, `caption` fields
+- Unit tests pass but live Eko rejects or silently drops
+- Needs: check gateway logs, test raw curl, verify multipart format
+
+**Outbound file:** ❌ Not tested yet (same issue expected)
+- Endpoint: `/bot/v1/direct/file`
 
 | Field | Path | Notes |
 |-------|------|-------|
