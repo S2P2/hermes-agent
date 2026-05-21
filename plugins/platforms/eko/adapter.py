@@ -1066,8 +1066,8 @@ def register(ctx) -> None:
         pii_safe=False,
         allow_update_command=True,
         platform_hint=(
-            "You are chatting via Eko Messaging API. Messages are plain text. "
-            "Keep responses concise and well-structured. "
-            "Media support (images, files) is not yet available."
+            "You are chatting via Eko Messaging API. "
+            "You can send images and files to the user. "
+            "Keep responses concise and well-structured."
         ),
     )
