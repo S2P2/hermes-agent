@@ -849,3 +849,134 @@ class TestOutboundMedia:
         adapter._client = None
         result = await adapter.send_document("chat1", "/fake/file.pdf")
         assert not result.success
+
+
+# ---------------------------------------------------------------------------
+# 14. Signature enforcement in _handle_webhook
+# ---------------------------------------------------------------------------
+
+def _sign_body(secret: str, body: bytes) -> str:
+    """Compute the expected X-Eko-Signature for *body*."""
+    return base64.b64encode(
+        hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    ).decode("utf-8")
+
+
+def _mock_request(body: bytes, headers: dict = None):
+    """Build a minimal aiohttp-like ``web.Request`` for testing."""
+    from aiohttp import web
+
+    req = MagicMock()
+    req.headers = headers or {}
+    req.read = AsyncMock(return_value=body)
+    return req
+
+
+def _make_webhook_adapter(
+    secret: str = "my_oauth_secret",
+    require_signature: bool = True,
+) -> EkoAdapter:
+    """Create a bare adapter wired for webhook handler tests."""
+    adapter = EkoAdapter.__new__(EkoAdapter)
+    adapter.webhook_secret = secret
+    adapter.require_signature = require_signature
+    adapter._dedup = _MessageDeduplicator()
+    adapter._bot_user_id = None
+    adapter.allow_all = True
+    adapter.allowed_users = set()
+    adapter.handle_message = AsyncMock()
+    adapter.platform = Platform("eko")
+    adapter._reply_tokens = {}
+    adapter.reply_token_ttl = 50
+    adapter._client = MagicMock()
+    return adapter
+
+
+class TestWebhookSignatureEnforcement:
+
+    @pytest.mark.asyncio
+    async def test_missing_signature_rejected_by_default(self):
+        adapter = _make_webhook_adapter(require_signature=True)
+        body = b'{"events":[]}'
+        req = _mock_request(body, headers={})
+        resp = await adapter._handle_webhook(req)
+        assert resp.status == 401
+        assert "missing signature" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_rejected(self):
+        adapter = _make_webhook_adapter(require_signature=True)
+        body = b'{"events":[]}'
+        req = _mock_request(body, headers={"x-eko-signature": "bad_sig"})
+        resp = await adapter._handle_webhook(req)
+        assert resp.status == 403
+        assert "invalid signature" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_valid_signature_accepted(self):
+        secret = "my_oauth_secret"
+        adapter = _make_webhook_adapter(secret=secret, require_signature=True)
+        body = b'{"events":[]}'
+        sig = _sign_body(secret, body)
+        req = _mock_request(body, headers={"x-eko-signature": sig})
+        resp = await adapter._handle_webhook(req)
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_bypass_allows_missing_signature(self):
+        adapter = _make_webhook_adapter(require_signature=False)
+        body = b'{"events":[]}'
+        req = _mock_request(body, headers={})
+        resp = await adapter._handle_webhook(req)
+        assert resp.status == 200
+
+    @pytest.mark.asyncio
+    async def test_bypass_still_rejects_bad_signature(self):
+        """Even with require_signature=False, a present-but-wrong sig is 403."""
+        adapter = _make_webhook_adapter(require_signature=False)
+        body = b'{"events":[]}'
+        req = _mock_request(body, headers={"x-eko-signature": "wrong"})
+        resp = await adapter._handle_webhook(req)
+        assert resp.status == 403
+
+
+class TestSignatureNormalization:
+
+    def _make_adapter(self, secret: str = "my_oauth_secret") -> EkoAdapter:
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.oauth_client_secret = secret
+        adapter.webhook_secret = secret
+        return adapter
+
+    def test_whitespace_trimmed(self):
+        adapter = self._make_adapter()
+        body = b'{"events":[]}'
+        sig = _sign_body("my_oauth_secret", body)
+        # Leading/trailing whitespace should be stripped.
+        assert adapter._verify_signature(body, f"  {sig}  ")
+
+    def test_sha256_prefix_stripped(self):
+        adapter = self._make_adapter()
+        body = b'{"events":[]}'
+        sig = _sign_body("my_oauth_secret", body)
+        # Some proxies add "sha256=" prefix — should be accepted.
+        assert adapter._verify_signature(body, f"sha256={sig}")
+
+    def test_sha256_prefix_case_insensitive(self):
+        adapter = self._make_adapter()
+        body = b'{"events":[]}'
+        sig = _sign_body("my_oauth_secret", body)
+        assert adapter._verify_signature(body, f"SHA256={sig}")
+
+    def test_bare_signature_still_works(self):
+        adapter = self._make_adapter()
+        body = b'{"events":[]}'
+        sig = _sign_body("my_oauth_secret", body)
+        assert adapter._verify_signature(body, sig)
+
+    def test_sha256_prefix_with_whitespace(self):
+        adapter = self._make_adapter()
+        body = b'{"events":[]}'
+        sig = _sign_body("my_oauth_secret", body)
+        # Both whitespace and prefix.
+        assert adapter._verify_signature(body, f"  sha256={sig}  ")

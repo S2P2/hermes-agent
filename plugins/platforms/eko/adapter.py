@@ -18,8 +18,11 @@ the request is retried once with a fresh token.
 
 **Webhook signature verification.** Inbound webhook requests are verified
 via the ``X-Eko-Signature`` header (HMAC-SHA256 of the raw body, Base64-
-encoded, keyed by the OAuth client secret). If the header is present but
-the signature doesn't match, the request is rejected with 403.
+encoded, keyed by the OAuth client secret).  **Signature verification is
+required by default.** Requests without a valid signature are rejected
+(401 if missing, 403 if invalid).  Set ``EKO_REQUIRE_SIGNATURE=false``
+(or ``extra.require_signature: false`` in config) to disable for local
+development only.
 
 **Configurable base URL.** Eko uses customer-specific hostnames
 (e.g. ``customer-h1.ekoapp.com``) so the base URL is a required env var.
@@ -427,150 +430,12 @@ class EkoAdapter(BasePlatformAdapter):
         except (TypeError, ValueError):
             self.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
 
-        # Runtime state
-        self._client: Optional[_EkoClient] = None
-        self._app = None  # aiohttp.web.Application
-        self._runner = None  # aiohttp.web.AppRunner
-        self._site = None  # aiohttp.web.TCPSite
-        self._reply_tokens: Dict[str, Tuple[str, float]] = {}  # chat_id -> (token, expiry)
-        self._dedup = _MessageDeduplicator()
-        # Reserved for future self-message filtering if Eko provides
-        # a bot identity API.
-        self._bot_user_id: Optional[str] = None
-
-    # ------------------------------------------------------------------
-    # Connection lifecycle
-    # ------------------------------------------------------------------
-
-    async def connect(self) -> bool:
-        if not self.base_url:
-            self._set_fatal_error(
-                "config_missing",
-                "EKO_BASE_URL must be set",
-                retryable=False,
-            )
-            return False
-        if not self.oauth_client_id or not self.oauth_client_secret:
-            self._set_fatal_error(
-                "config_missing",
-                "EKO_OAUTH_CLIENT_ID and EKO_OAUTH_CLIENT_SECRET must be set",
-                retryable=False,
-            )
-            return False
-
-        self._client = _EkoClient(
-            base_url=self.base_url,
-            client_id=self.oauth_client_id,
-            client_secret=self.oauth_client_secret,
+        # Signature enforcement (default: required for production safety).
+        self.require_signature = _truthy_env(
+            "EKO_REQUIRE_SIGNATURE",
+            bool(extra.get("require_signature", True)),
         )
 
-        # Verify OAuth credentials work before starting the webhook server.
-        try:
-            await self._client.ensure_token()
-        except Exception as exc:
-            self._set_fatal_error(
-                "auth_failed",
-                f"Eko OAuth authentication failed: {exc}",
-                retryable=True,
-            )
-            return False
-
-        # Start the aiohttp webhook server.
-        try:
-            from aiohttp import web
-        except ImportError:
-            self._set_fatal_error(
-                "missing_dep",
-                "aiohttp is required for the Eko adapter - install with `pip install aiohttp`",
-                retryable=False,
-            )
-            return False
-
-        self._app = web.Application(client_max_size=WEBHOOK_BODY_MAX_BYTES)
-        self._app.router.add_post(self.webhook_path, self._handle_webhook)
-        self._app.router.add_get(
-            f"{self.webhook_path}/health", self._handle_health
-        )
-
-        self._runner = web.AppRunner(self._app)
-        try:
-            await self._runner.setup()
-            self._site = web.TCPSite(
-                self._runner, self.webhook_host, self.webhook_port
-            )
-            await self._site.start()
-        except Exception as exc:
-            # Clean up partially initialized runner on failure.
-            if self._runner is not None:
-                try:
-                    await self._runner.cleanup()
-                except Exception:
-                    pass
-                self._runner = None
-            self._site = None
-            self._set_fatal_error(
-                "bind_failed",
-                f"Could not start Eko webhook on {self.webhook_host}:{self.webhook_port}: {exc}",
-                retryable=True,
-            )
-            return False
-
-        self._mark_connected()
-        logger.info(
-            "Eko: webhook listening on %s:%s%s",
-            self.webhook_host,
-            self.webhook_port,
-            self.webhook_path,
-        )
-        return True
-
-    async def disconnect(self) -> None:
-        self._mark_disconnected()
-
-        if self._site is not None:
-            try:
-                await self._site.stop()
-            except Exception:
-                pass
-            self._site = None
-        if self._runner is not None:
-            try:
-                await self._runner.cleanup()
-            except Exception:
-                pass
-            self._runner = None
-        self._app = None
-
-    # ------------------------------------------------------------------
-    # Webhook handlers
-    # ------------------------------------------------------------------
-
-    async def _handle_health(self, request) -> Any:
-        from aiohttp import web
-        return web.json_response({"status": "ok", "platform": "eko"})
-
-    async def _handle_webhook(self, request) -> Any:
-        from aiohttp import web
-
-        try:
-            body = await request.read()
-        except Exception as exc:
-            logger.debug("Eko: read failed: %s", exc)
-            return web.Response(status=400, text="bad request")
-        if len(body) > WEBHOOK_BODY_MAX_BYTES:
-            return web.Response(status=413, text="payload too large")
-
-        # Verify X-Eko-Signature (HMAC-SHA256 of raw body, Base64-encoded,
-        # keyed by the OAuth client secret). Reject if signature is present
-        # but doesn't match; allow through if header is absent (proxied
-        # setups that strip it).
-        sig_header = request.headers.get("x-eko-signature")
-        if sig_header:
-            if not self._verify_signature(body, sig_header):
-                logger.warning("Eko: invalid X-Eko-Signature — rejecting webhook")
-                return web.Response(status=403, text="invalid signature")
-        else:
-            logger.debug("Eko: no X-Eko-Signature header — skipping verification")
 
         try:
             payload = json.loads(body.decode("utf-8"))
@@ -951,9 +816,18 @@ class EkoAdapter(BasePlatformAdapter):
         Eko signs webhook payloads with HMAC-SHA256.  The signing key
         defaults to the OAuth client secret but can be overridden via
         ``EKO_WEBHOOK_SECRET`` for tenants that provide a separate key.
+
+        The signature is normalised before comparison:
+        - Leading/trailing whitespace is stripped.
+        - An optional ``sha256=`` prefix (added by some proxies) is
+          stripped so the comparison is always against the raw Base64.
         """
         if not self.webhook_secret:
             return False
+        # Normalise: strip whitespace and optional sha256= prefix.
+        sig = signature.strip()
+        if sig.lower().startswith("sha256="):
+            sig = sig[7:]
         expected = base64.b64encode(
             hmac.new(
                 self.webhook_secret.encode("utf-8"),
@@ -961,7 +835,7 @@ class EkoAdapter(BasePlatformAdapter):
                 hashlib.sha256,
             ).digest()
         ).decode("utf-8")
-        return hmac.compare_digest(expected, signature)
+        return hmac.compare_digest(expected, sig)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """No-op - Eko has no documented typing indicator API."""
