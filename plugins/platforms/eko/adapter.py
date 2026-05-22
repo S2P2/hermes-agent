@@ -387,6 +387,9 @@ class EkoAdapter(BasePlatformAdapter):
             os.getenv("EKO_WEBHOOK_SECRET")
             or extra.get("webhook_secret", "")
         ) or self.oauth_client_secret
+        self.require_signature = _truthy_env(
+            "EKO_REQUIRE_SIGNATURE", bool(extra.get("require_signature", True))
+        )
 
         # Webhook server
         self.webhook_host = os.getenv("EKO_HOST") or extra.get("host", "0.0.0.0")
@@ -561,16 +564,18 @@ class EkoAdapter(BasePlatformAdapter):
             return web.Response(status=413, text="payload too large")
 
         # Verify X-Eko-Signature (HMAC-SHA256 of raw body, Base64-encoded,
-        # keyed by the OAuth client secret). Reject if signature is present
-        # but doesn't match; allow through if header is absent (proxied
-        # setups that strip it).
-        sig_header = request.headers.get("x-eko-signature")
-        if sig_header:
-            if not self._verify_signature(body, sig_header):
-                logger.warning("Eko: invalid X-Eko-Signature — rejecting webhook")
-                return web.Response(status=403, text="invalid signature")
-        else:
+        # keyed by the OAuth client secret). Signature verification is
+        # required by default; local dev can disable it with
+        # EKO_REQUIRE_SIGNATURE=false.
+        sig_header = request.headers.get("x-eko-signature", "")
+        if not sig_header:
+            if self.require_signature:
+                logger.warning("Eko: missing X-Eko-Signature — rejecting webhook")
+                return web.Response(status=401, text="missing signature")
             logger.debug("Eko: no X-Eko-Signature header — skipping verification")
+        elif not self._verify_signature(body, sig_header):
+            logger.warning("Eko: invalid X-Eko-Signature — rejecting webhook")
+            return web.Response(status=403, text="invalid signature")
 
         try:
             payload = json.loads(body.decode("utf-8"))
@@ -948,12 +953,20 @@ class EkoAdapter(BasePlatformAdapter):
     def _verify_signature(self, body: bytes, signature: str) -> bool:
         """Verify X-Eko-Signature HMAC-SHA256-Base64 digest.
 
-        Eko signs webhook payloads with HMAC-SHA256.  The signing key
+        Eko signs webhook payloads with HMAC-SHA256. The signing key
         defaults to the OAuth client secret but can be overridden via
         ``EKO_WEBHOOK_SECRET`` for tenants that provide a separate key.
+
+        The header is normalized before comparison:
+        - Leading/trailing whitespace is stripped.
+        - An optional ``sha256=`` prefix is stripped so proxy-added
+          prefixes still verify against the raw Base64 digest.
         """
         if not self.webhook_secret:
             return False
+        sig = signature.strip()
+        if sig.lower().startswith("sha256="):
+            sig = sig[7:]
         expected = base64.b64encode(
             hmac.new(
                 self.webhook_secret.encode("utf-8"),
@@ -961,7 +974,7 @@ class EkoAdapter(BasePlatformAdapter):
                 hashlib.sha256,
             ).digest()
         ).decode("utf-8")
-        return hmac.compare_digest(expected, signature)
+        return hmac.compare_digest(expected, sig)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """No-op - Eko has no documented typing indicator API."""
