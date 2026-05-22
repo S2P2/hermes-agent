@@ -26,7 +26,7 @@ import pytest
 from tests.gateway._plugin_adapter_loader import load_plugin_adapter
 
 from gateway.config import Platform
-from gateway.platforms.base import MessageType
+from gateway.platforms.base import BasePlatformAdapter, MessageType
 
 _eko = load_plugin_adapter("eko")
 
@@ -170,12 +170,21 @@ class TestEkoAuthError:
 
 class TestSendRouting:
 
+    @staticmethod
+    def _make_routing_adapter(**overrides):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = overrides.get("_reply_tokens", {})
+        adapter._client = overrides.get("_client", MagicMock())
+        adapter.message_max_chars = overrides.get("message_max_chars", 50_000)
+        adapter.truncate_message = BasePlatformAdapter.truncate_message
+        return adapter
+
     @pytest.mark.asyncio
     async def test_reply_token_used_first(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock()
-        adapter._client.reply_text = AsyncMock()
+        adapter = self._make_routing_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(reply_text=AsyncMock()),
+        )
 
         result = await adapter.send("chat1", "hello")
         assert result.success
@@ -184,11 +193,13 @@ class TestSendRouting:
 
     @pytest.mark.asyncio
     async def test_falls_back_to_push_on_reply_error(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock()
-        adapter._client.reply_text = AsyncMock(side_effect=RuntimeError("reply failed"))
-        adapter._client.push_text = AsyncMock()
+        adapter = self._make_routing_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(
+                reply_text=AsyncMock(side_effect=RuntimeError("reply failed")),
+                push_text=AsyncMock(),
+            ),
+        )
 
         result = await adapter.send("chat1", "hello")
         assert result.success
@@ -197,11 +208,13 @@ class TestSendRouting:
 
     @pytest.mark.asyncio
     async def test_auth_error_triggers_push_retry(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock()
-        adapter._client.reply_text = AsyncMock(side_effect=_EkoAuthError("401"))
-        adapter._client.push_text = AsyncMock()
+        adapter = self._make_routing_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(
+                reply_text=AsyncMock(side_effect=_EkoAuthError("401")),
+                push_text=AsyncMock(),
+            ),
+        )
 
         result = await adapter.send("chat1", "hello")
         assert result.success
@@ -209,10 +222,9 @@ class TestSendRouting:
 
     @pytest.mark.asyncio
     async def test_push_used_when_no_reply_token(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._client = MagicMock()
-        adapter._client.push_text = AsyncMock()
+        adapter = self._make_routing_adapter(
+            _client=MagicMock(push_text=AsyncMock()),
+        )
 
         result = await adapter.send("chat1", "hello")
         assert result.success
@@ -220,12 +232,10 @@ class TestSendRouting:
 
     @pytest.mark.asyncio
     async def test_push_auth_error_retries(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._client = MagicMock()
-        # First call: 401. Second call: success.
-        adapter._client.push_text = AsyncMock(
-            side_effect=[_EkoAuthError("401"), None]
+        adapter = self._make_routing_adapter(
+            _client=MagicMock(
+                push_text=AsyncMock(side_effect=[_EkoAuthError("401"), None]),
+            ),
         )
 
         result = await adapter.send("chat1", "hello")
@@ -234,10 +244,11 @@ class TestSendRouting:
 
     @pytest.mark.asyncio
     async def test_push_failure_returns_retryable(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._client = MagicMock()
-        adapter._client.push_text = AsyncMock(side_effect=RuntimeError("server error"))
+        adapter = self._make_routing_adapter(
+            _client=MagicMock(
+                push_text=AsyncMock(side_effect=RuntimeError("server error")),
+            ),
+        )
 
         result = await adapter.send("chat1", "hello")
         assert not result.success
@@ -250,6 +261,61 @@ class TestSendRouting:
         result = await adapter.send("chat1", "hello")
         assert not result.success
         assert "not connected" in result.error
+
+
+# ---------------------------------------------------------------------------
+# 5b. Outbound chunking
+# ---------------------------------------------------------------------------
+
+class TestSendChunking:
+
+    def _make_adapter(self, max_chars: int = 10) -> EkoAdapter:
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock()
+        adapter._client.push_text = AsyncMock()
+        adapter._client.reply_text = AsyncMock()
+        adapter.message_max_chars = max_chars
+        adapter.truncate_message = BasePlatformAdapter.truncate_message
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_short_message_sent_as_one(self):
+        adapter = self._make_adapter(max_chars=100)
+        result = await adapter.send("chat1", "hello")
+        assert result.success
+        adapter._client.push_text.assert_called_once_with("chat1", "hello")
+
+    @pytest.mark.asyncio
+    async def test_long_message_is_chunked(self):
+        adapter = self._make_adapter(max_chars=10)
+        long_text = "a" * 25
+        result = await adapter.send("chat1", long_text)
+        assert result.success
+        # Should have been split into multiple push calls.
+        assert adapter._client.push_text.call_count > 1
+
+    @pytest.mark.asyncio
+    async def test_first_chunk_uses_reply_token(self):
+        adapter = self._make_adapter(max_chars=10)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        long_text = "hello world and more text here"
+        result = await adapter.send("chat1", long_text)
+        assert result.success
+        # First chunk via reply_text.
+        adapter._client.reply_text.assert_called_once()
+        # Remaining chunks via push_text.
+        assert adapter._client.push_text.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_chunk_failure_stops_sending(self):
+        adapter = self._make_adapter(max_chars=10)
+        adapter._client.push_text = AsyncMock(
+            side_effect=RuntimeError("fail")
+        )
+        long_text = "hello world and more"
+        result = await adapter.send("chat1", long_text)
+        assert not result.success
 
 
 # ---------------------------------------------------------------------------
@@ -271,11 +337,11 @@ class TestRegistration:
         assert call_kwargs["allow_all_env"] == "EKO_ALLOW_ALL_USERS"
         assert "Eko Messaging API" in call_kwargs["platform_hint"]
 
-    def test_platform_hint_mentions_plain_text(self):
+    def test_platform_hint_mentions_media_support(self):
         ctx = MagicMock()
         register(ctx)
         hint = ctx.register_platform.call_args[1]["platform_hint"]
-        assert "plain text" in hint
+        assert "images and files" in hint
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +407,7 @@ class TestSignatureVerification:
     def _make_adapter(self, secret: str = "my_oauth_secret") -> EkoAdapter:
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter.oauth_client_secret = secret
+        adapter.webhook_secret = secret
         return adapter
 
     def test_valid_signature_passes(self):
@@ -370,10 +437,31 @@ class TestSignatureVerification:
 
     def test_none_secret_always_fails(self):
         adapter = self._make_adapter("my_oauth_secret")
-        adapter.oauth_client_secret = None
+        adapter.webhook_secret = None
         body = b'{"events":[]}'
         sig = self._sign("my_oauth_secret", body)
         assert not adapter._verify_signature(body, sig)
+
+    def test_separate_webhook_secret_used(self):
+        """EKO_WEBHOOK_SECRET overrides oauth_client_secret."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.oauth_client_secret = "oauth_secret"
+        adapter.webhook_secret = "webhook_secret"
+        body = b'{"events":[]}'
+        sig = self._sign("webhook_secret", body)
+        assert adapter._verify_signature(body, sig)
+        # OAuth secret should NOT work when webhook_secret is set.
+        sig_oauth = self._sign("oauth_secret", body)
+        assert not adapter._verify_signature(body, sig_oauth)
+
+    def test_falls_back_to_oauth_secret(self):
+        """When EKO_WEBHOOK_SECRET is empty, oauth_client_secret is used."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.oauth_client_secret = "oauth_secret"
+        adapter.webhook_secret = "oauth_secret"  # fallback kicks in during __init__
+        body = b'{"events":[]}'
+        sig = self._sign("oauth_secret", body)
+        assert adapter._verify_signature(body, sig)
 
     def test_realistic_payload(self):
         adapter = self._make_adapter("client_secret_abc")

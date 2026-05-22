@@ -54,6 +54,7 @@ DEFAULT_WEBHOOK_PORT = 8647
 DEFAULT_WEBHOOK_PATH = "/eko/webhook"
 DEFAULT_REPLY_TOKEN_TTL = 50  # conservative below Eko's estimated ~60 s
 WEBHOOK_BODY_MAX_BYTES = 1_048_576  # 1 MiB
+DEFAULT_MESSAGE_MAX_CHARS = 5000  # conservative until Eko limit confirmed
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +383,10 @@ class EkoAdapter(BasePlatformAdapter):
             os.getenv("EKO_OAUTH_CLIENT_SECRET")
             or extra.get("oauth_client_secret", "")
         )
+        self.webhook_secret = (
+            os.getenv("EKO_WEBHOOK_SECRET")
+            or extra.get("webhook_secret", "")
+        ) or self.oauth_client_secret
 
         # Webhook server
         self.webhook_host = os.getenv("EKO_HOST") or extra.get("host", "0.0.0.0")
@@ -412,6 +417,15 @@ class EkoAdapter(BasePlatformAdapter):
             )
         except (TypeError, ValueError):
             self.reply_token_ttl = DEFAULT_REPLY_TOKEN_TTL
+
+        # Outbound message chunking
+        try:
+            self.message_max_chars = int(
+                os.getenv("EKO_MESSAGE_MAX_CHARS")
+                or extra.get("message_max_chars", DEFAULT_MESSAGE_MAX_CHARS)
+            )
+        except (TypeError, ValueError):
+            self.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
 
         # Runtime state
         self._client: Optional[_EkoClient] = None
@@ -485,10 +499,18 @@ class EkoAdapter(BasePlatformAdapter):
                 self._runner, self.webhook_host, self.webhook_port
             )
             await self._site.start()
-        except OSError as exc:
+        except Exception as exc:
+            # Clean up partially initialized runner on failure.
+            if self._runner is not None:
+                try:
+                    await self._runner.cleanup()
+                except Exception:
+                    pass
+                self._runner = None
+            self._site = None
             self._set_fatal_error(
                 "bind_failed",
-                f"Could not bind Eko webhook on {self.webhook_host}:{self.webhook_port}: {exc}",
+                f"Could not start Eko webhook on {self.webhook_host}:{self.webhook_port}: {exc}",
                 retryable=True,
             )
             return False
@@ -713,7 +735,26 @@ class EkoAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Eko adapter not connected")
 
-        # Try reply token first, fall back to push.
+        chunks = self.truncate_message(content, self.message_max_chars)
+        if not chunks:
+            return SendResult(success=True)
+
+        last_result = SendResult(success=True)
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                # First chunk: try reply token, fall back to push.
+                last_result = await self._send_reply_or_push(chat_id, chunk)
+            else:
+                # Subsequent chunks: push only (reply token is single-use).
+                last_result = await self._send_push_only(chat_id, chunk)
+            if not last_result.success:
+                return last_result
+        return last_result
+
+    async def _send_reply_or_push(
+        self, chat_id: str, content: str
+    ) -> SendResult:
+        """Send content using reply token first, push as fallback."""
         token, used_reply = self._consume_reply_token(chat_id)
         if used_reply:
             try:
@@ -748,6 +789,23 @@ class EkoAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc), retryable=True)
         except Exception as exc:
             logger.error("Eko: send failed: %s", exc)
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def _send_push_only(
+        self, chat_id: str, content: str
+    ) -> SendResult:
+        """Send content via push API only (for chunk N+1)."""
+        try:
+            await self._client.push_text(chat_id, content)
+            return SendResult(success=True, message_id=None)
+        except _EkoAuthError:
+            try:
+                await self._client.push_text(chat_id, content)
+                return SendResult(success=True, message_id=None)
+            except Exception as exc2:
+                return SendResult(success=False, error=str(exc2))
+        except Exception as exc:
+            logger.error("Eko: push chunk failed: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
 
     # ------------------------------------------------------------------
@@ -890,14 +948,15 @@ class EkoAdapter(BasePlatformAdapter):
     def _verify_signature(self, body: bytes, signature: str) -> bool:
         """Verify X-Eko-Signature HMAC-SHA256-Base64 digest.
 
-        Eko signs webhook payloads with HMAC-SHA256 using the OAuth client
-        secret as the key, and Base64-encodes the digest.
+        Eko signs webhook payloads with HMAC-SHA256.  The signing key
+        defaults to the OAuth client secret but can be overridden via
+        ``EKO_WEBHOOK_SECRET`` for tenants that provide a separate key.
         """
-        if not self.oauth_client_secret:
+        if not self.webhook_secret:
             return False
         expected = base64.b64encode(
             hmac.new(
-                self.oauth_client_secret.encode("utf-8"),
+                self.webhook_secret.encode("utf-8"),
                 body,
                 hashlib.sha256,
             ).digest()
@@ -968,6 +1027,8 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
         seeded["host"] = os.environ["EKO_HOST"]
     if os.getenv("EKO_WEBHOOK_PATH"):
         seeded["webhook_path"] = os.environ["EKO_WEBHOOK_PATH"]
+    if os.getenv("EKO_WEBHOOK_SECRET"):
+        seeded["webhook_secret"] = os.environ["EKO_WEBHOOK_SECRET"]
     if os.getenv("EKO_HOME_CHANNEL"):
         seeded["home_channel"] = os.environ["EKO_HOME_CHANNEL"]
     return seeded or {}
@@ -1034,6 +1095,7 @@ def interactive_setup() -> None:
     _prompt("EKO_BASE_URL", "Eko base URL (e.g. https://customer-h1.ekoapp.com)")
     _prompt("EKO_OAUTH_CLIENT_ID", "OAuth client ID")
     _prompt("EKO_OAUTH_CLIENT_SECRET", "OAuth client secret", secret=True)
+    _prompt("EKO_WEBHOOK_SECRET", "Webhook signing secret (blank = use OAuth secret)", secret=True)
     _prompt("EKO_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)")
     print(
         "Done. Set the webhook URL in the Eko admin panel to "

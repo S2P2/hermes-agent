@@ -44,6 +44,9 @@ EKO_BASE_URL=https://customer-h1.ekoapp.com
 EKO_OAUTH_CLIENT_ID=your_client_id
 EKO_OAUTH_CLIENT_SECRET=your_client_secret
 
+# Optional
+EKO_WEBHOOK_SECRET=your_webhook_signing_secret
+
 # Recommended
 EKO_ALLOWED_USERS=your_eko_user_id
 EKO_HOME_CHANNEL=your_eko_user_id
@@ -114,6 +117,7 @@ Open Eko, create a 1:1 chat with the bot, and send a message.
 | `EKO_BASE_URL` | Yes | — | Eko server base URL |
 | `EKO_OAUTH_CLIENT_ID` | Yes | — | Bot OAuth client ID |
 | `EKO_OAUTH_CLIENT_SECRET` | Yes | — | Bot OAuth client secret |
+| `EKO_WEBHOOK_SECRET` | No | (OAuth secret) | Separate webhook HMAC signing key |
 | `EKO_PORT` | No | `8647` | Webhook listen port |
 | `EKO_HOST` | No | `0.0.0.0` | Webhook bind host |
 | `EKO_WEBHOOK_PATH` | No | `/eko/webhook` | Webhook endpoint path |
@@ -121,6 +125,7 @@ Open Eko, create a 1:1 chat with the bot, and send a message.
 | `EKO_ALLOW_ALL_USERS` | No | `false` | Allow any user (dev only) |
 | `EKO_HOME_CHANNEL` | No | (empty) | Default user ID for cron delivery |
 | `EKO_REPLY_TOKEN_TTL` | No | `50` | Reply-token TTL in seconds |
+| `EKO_MESSAGE_MAX_CHARS` | No | `5000` | Max chars per outbound message (chunks longer text) |
 
 ## Architecture
 
@@ -176,7 +181,6 @@ When the token is absent or expired, the adapter falls back to the push API.
 | Feature | Description | Notes |
 |---------|-------------|-------|
 | Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
-| Message length limits | Determine Eko's max message size, chunk long responses | Currently untested — responses may truncate |
 
 ### Low priority
 
