@@ -1815,8 +1815,9 @@ async def _send_eko_media(pconfig, chat_id, chunks, media_files):
         last_result = None
         for i, chunk in enumerate(chunks):
             is_last = (i == len(chunks) - 1)
+            from gateway.config import Platform as _Platform
             result = await _send_via_adapter(
-                Platform("eko"),
+                _Platform("eko"),
                 pconfig,
                 chat_id,
                 chunk,
