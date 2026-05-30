@@ -1396,3 +1396,116 @@ class TestStandaloneSend:
         assert result["success"] is True
         mock_push.assert_not_called()  # empty message skips push_text
         mock_pic.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Group/topic send routing
+# ---------------------------------------------------------------------------
+
+
+class TestGroupSendRouting:
+    """Tests for routing outbound sends to group/topic endpoints."""
+
+    def test_is_group_chat_dm_returns_false(self):
+        """DM routing returns False for _is_group_chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {
+            "sid1": {"uid": "u1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+        }
+        assert adapter._is_group_chat("sid1") is False
+
+    def test_is_group_chat_team_returns_true(self):
+        """Team groupType returns True for _is_group_chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {
+            "sid2": {"uid": "u1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        assert adapter._is_group_chat("sid2") is True
+
+    def test_is_group_chat_unknown_returns_false(self):
+        """Unknown chat_id returns False for _is_group_chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {}
+        assert adapter._is_group_chat("unknown") is False
+
+    @pytest.mark.asyncio
+    async def test_send_text_uses_group_endpoint(self):
+        """send() routes to push_group_text for team chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        adapter._client = MagicMock(
+            push_group_text=AsyncMock(),
+            push_text=AsyncMock(),
+        )
+        adapter.message_max_chars = 50_000
+        adapter.truncate_message = BasePlatformAdapter.truncate_message
+
+        result = await adapter.send("g2_t2", "hello group")
+        assert result.success
+        adapter._client.push_group_text.assert_called_once_with("g2", "t2", "hello group")
+        adapter._client.push_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_text_dm_uses_direct_endpoint(self):
+        """send() routes to push_text for DM chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g1_t1": {"uid": "user_1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+        }
+        adapter._client = MagicMock(
+            push_group_text=AsyncMock(),
+            push_text=AsyncMock(),
+        )
+        adapter.message_max_chars = 50_000
+        adapter.truncate_message = BasePlatformAdapter.truncate_message
+
+        result = await adapter.send("g1_t1", "hello dm")
+        assert result.success
+        adapter._client.push_text.assert_called_once_with("user_1", "hello dm")
+        adapter._client.push_group_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_uses_group_endpoint(self, tmp_path):
+        """send_image_file() routes to push_group_picture for team chat."""
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\nfake")
+
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        adapter._client = MagicMock(
+            push_group_picture=AsyncMock(),
+            push_picture=AsyncMock(),
+        )
+
+        result = await adapter.send_image_file("g2_t2", str(img))
+        assert result.success
+        adapter._client.push_group_picture.assert_called_once()
+        adapter._client.push_picture.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_document_uses_group_endpoint(self, tmp_path):
+        """send_document() routes to push_group_file for team chat."""
+        doc = tmp_path / "report.pdf"
+        doc.write_bytes(b"%PDF-fake")
+
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        adapter._client = MagicMock(
+            push_group_file=AsyncMock(),
+            push_file=AsyncMock(),
+        )
+
+        result = await adapter.send_document("g2_t2", str(doc))
+        assert result.success
+        adapter._client.push_group_file.assert_called_once()
+        adapter._client.push_file.assert_not_called()

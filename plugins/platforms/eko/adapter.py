@@ -370,10 +370,113 @@ class _EkoClient:
                         f"Eko push file failed ({resp.status}): {body[:200]}"
                     )
 
+    # ------------------------------------------------------------------
+    # Group/topic endpoints
+    # ------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Adapter
-# ---------------------------------------------------------------------------
+    async def push_group_text(self, gid: str, tid: str, message: str) -> None:
+        """Push a text message to a group/topic."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/group/message"
+        payload = {
+            "gid": gid,
+            "tid": tid,
+            "message": {"type": "text", "data": message},
+        }
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url,
+                headers={**self._auth_headers(token), "Content-Type": "application/json"},
+                json=payload,
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError("Eko group push returned 401 Unauthorized")
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko group push failed ({resp.status}): {body[:200]}"
+                    )
+
+    async def push_group_picture(
+        self,
+        gid: str,
+        tid: str,
+        file_bytes: bytes,
+        filename: str,
+        caption: str = "",
+    ) -> None:
+        """Push an image to a group/topic via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/group/picture"
+        data = aiohttp.FormData()
+        data.add_field("gid", gid)
+        data.add_field("tid", tid)
+        if caption:
+            data.add_field("caption", caption)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type=_guess_content_type(filename),
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko group push picture returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko group push picture failed ({resp.status}): {body[:200]}"
+                    )
+
+    async def push_group_file(
+        self,
+        gid: str,
+        tid: str,
+        file_bytes: bytes,
+        filename: str,
+    ) -> None:
+        """Push a file to a group/topic via multipart upload."""
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/group/file"
+        data = aiohttp.FormData()
+        data.add_field("gid", gid)
+        data.add_field("tid", tid)
+        data.add_field(
+            "file",
+            file_bytes,
+            filename=filename,
+            content_type=_guess_content_type(filename),
+        )
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko group push file returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko group push file failed ({resp.status}): {body[:200]}"
+                    )
 
 class EkoAdapter(BasePlatformAdapter):
     """Eko Messaging API gateway adapter."""
@@ -818,11 +921,22 @@ class EkoAdapter(BasePlatformAdapter):
             return routing.get("uid", chat_id)
         return chat_id
 
+    def _get_routing(self, chat_id: str) -> Optional[Dict[str, str]]:
+        """Return routing metadata for a chat_id, or None."""
+        return self._session_routing.get(chat_id) if hasattr(self, '_session_routing') else None
+
+    def _is_group_chat(self, chat_id: str) -> bool:
+        """Check if chat_id maps to a group/topic (not a DM)."""
+        routing = self._get_routing(chat_id)
+        return bool(routing and routing.get("groupType") and routing["groupType"] != "direct_chat")
+
     async def _send_reply_or_push(
         self, chat_id: str, content: str
     ) -> SendResult:
         """Send content using reply token first, push as fallback."""
         uid = self._resolve_uid(chat_id)
+        routing = self._get_routing(chat_id)
+        is_group = self._is_group_chat(chat_id)
         token, used_reply = self._consume_reply_token(chat_id)
         if used_reply:
             try:
@@ -831,7 +945,10 @@ class EkoAdapter(BasePlatformAdapter):
             except _EkoAuthError:
                 # Token expired or invalid - retry with fresh auth + push.
                 try:
-                    await self._client.push_text(uid, content)
+                    if is_group and routing:
+                        await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
+                    else:
+                        await self._client.push_text(uid, content)
                     return SendResult(success=True, message_id=None)
                 except Exception as exc2:
                     logger.error("Eko: push after 401 failed: %s", exc2)
@@ -843,12 +960,18 @@ class EkoAdapter(BasePlatformAdapter):
                 # Fall through to push.
 
         try:
-            await self._client.push_text(uid, content)
+            if is_group and routing:
+                await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
+            else:
+                await self._client.push_text(uid, content)
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             # Retry once with fresh token.
             try:
-                await self._client.push_text(uid, content)
+                if is_group and routing:
+                    await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
+                else:
+                    await self._client.push_text(uid, content)
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
                 return SendResult(success=False, error=str(exc2))
@@ -864,12 +987,21 @@ class EkoAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send content via push API only (for chunk N+1)."""
         uid = self._resolve_uid(chat_id)
+        routing = self._get_routing(chat_id)
+        is_group = self._is_group_chat(chat_id)
+
+        async def _do_push():
+            if is_group and routing:
+                await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
+            else:
+                await self._client.push_text(uid, content)
+
         try:
-            await self._client.push_text(uid, content)
+            await _do_push()
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             try:
-                await self._client.push_text(uid, content)
+                await _do_push()
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
                 return SendResult(success=False, error=str(exc2))
@@ -890,7 +1022,7 @@ class EkoAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a local image file to an Eko user."""
+        """Send a local image file to an Eko user or group/topic."""
         if not self._client:
             return SendResult(success=False, error="Eko adapter not connected")
 
@@ -903,6 +1035,18 @@ class EkoAdapter(BasePlatformAdapter):
 
         filename = Path(image_path).name or "image.jpg"
         uid = self._resolve_uid(chat_id)
+        routing = self._get_routing(chat_id)
+        is_group = self._is_group_chat(chat_id)
+        _caption = caption or ""
+
+        async def _do_push_picture():
+            if is_group and routing:
+                await self._client.push_group_picture(
+                    routing["groupId"], routing["topicId"],
+                    file_bytes, filename, caption=_caption,
+                )
+            else:
+                await self._client.push_picture(uid, file_bytes, filename, caption=_caption)
 
         # Try reply token first, fall back to push.
         token, used_reply = self._consume_reply_token(chat_id)
@@ -912,9 +1056,7 @@ class EkoAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=token)
             except _EkoAuthError:
                 try:
-                    await self._client.push_picture(
-                        uid, file_bytes, filename, caption=caption or ""
-                    )
+                    await _do_push_picture()
                     return SendResult(success=True, message_id=None)
                 except Exception as exc2:
                     return SendResult(success=False, error=str(exc2))
@@ -922,15 +1064,11 @@ class EkoAdapter(BasePlatformAdapter):
                 logger.info("Eko: reply picture rejected (%s); falling back to push", exc)
 
         try:
-            await self._client.push_picture(
-                uid, file_bytes, filename, caption=caption or ""
-            )
+            await _do_push_picture()
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             try:
-                await self._client.push_picture(
-                    uid, file_bytes, filename, caption=caption or ""
-                )
+                await _do_push_picture()
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
                 return SendResult(success=False, error=str(exc2))
@@ -974,7 +1112,7 @@ class EkoAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a file/document to an Eko user."""
+        """Send a file/document to an Eko user or group/topic."""
         if not self._client:
             return SendResult(success=False, error="Eko adapter not connected")
 
@@ -987,14 +1125,25 @@ class EkoAdapter(BasePlatformAdapter):
 
         filename = file_name or Path(file_path).name or "document"
         uid = self._resolve_uid(chat_id)
+        routing = self._get_routing(chat_id)
+        is_group = self._is_group_chat(chat_id)
+
+        async def _do_push_file():
+            if is_group and routing:
+                await self._client.push_group_file(
+                    routing["groupId"], routing["topicId"],
+                    file_bytes, filename,
+                )
+            else:
+                await self._client.push_file(uid, file_bytes, filename)
 
         # No reply-token endpoint documented for files — always push.
         try:
-            await self._client.push_file(uid, file_bytes, filename)
+            await _do_push_file()
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             try:
-                await self._client.push_file(uid, file_bytes, filename)
+                await _do_push_file()
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
                 return SendResult(success=False, error=str(exc2))
