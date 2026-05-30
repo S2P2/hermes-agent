@@ -923,13 +923,25 @@ class EkoAdapter(BasePlatformAdapter):
         return self._session_routing.get(chat_id) if hasattr(self, '_session_routing') else None
 
     def _is_group_chat(self, chat_id: str) -> bool:
-        """Check if chat_id maps to a group/topic (not a DM)."""
+        """Check if chat_id maps to a group/topic (not a bare DM uid).
+
+        Returns True when the routing metadata has both groupId and topicId,
+        meaning the conversation is within a group+topic context that requires
+        the ``/bot/v1/group/*`` endpoints — regardless of ``groupType``.
+        Eko sets ``groupType: "direct_chat"`` even for topics inside DM-type
+        groups, so we cannot rely on it to distinguish DM from topic routing.
+        """
         routing = self._get_routing(chat_id)
-        result = bool(routing and routing.get("groupType") and routing["groupType"] != "direct_chat")
+        result = bool(
+            routing
+            and routing.get("groupId")
+            and routing.get("topicId")
+        )
         logger.info(
-            "[eko] _is_group_chat chat_id=%s routing=%s result=%s",
+            "[eko] _is_group_chat chat_id=%s gid=%s tid=%s result=%s",
             chat_id,
-            {k: v for k, v in (routing or {}).items() if k != "uid"} if routing else None,
+            routing.get("groupId") if routing else None,
+            routing.get("topicId") if routing else None,
             result,
         )
         return result
@@ -1319,7 +1331,7 @@ async def _standalone_send(
             _adapter = _runner.adapters.get(_Platform("eko"))
             if _adapter and hasattr(_adapter, "_get_routing"):
                 routing = _adapter._get_routing(chat_id)
-                if routing and routing.get("groupType") and routing["groupType"] != "direct_chat":
+                if routing and routing.get("groupId") and routing.get("topicId"):
                     is_group = True
     except Exception:
         pass

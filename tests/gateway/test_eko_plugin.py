@@ -1176,20 +1176,24 @@ class TestTopicRouting:
 
     @pytest.mark.asyncio
     async def test_send_resolves_uid_for_push(self):
-        """send() uses _resolve_uid for push_text, not the session chat_id."""
+        """send() uses group endpoint when routing has groupId+topicId."""
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
         adapter._session_routing = {
             "g1_t1": {"uid": "user_abc", "groupId": "g1", "topicId": "t1"},
         }
-        adapter._client = MagicMock(push_text=AsyncMock())
+        adapter._client = MagicMock(
+            push_group_text=AsyncMock(),
+            push_text=AsyncMock(),
+        )
         adapter.message_max_chars = 50_000
         adapter.truncate_message = BasePlatformAdapter.truncate_message
 
         result = await adapter.send("g1_t1", "hello")
         assert result.success
-        # push_text should receive the uid, not the session chat_id
-        adapter._client.push_text.assert_called_once_with("user_abc", "hello")
+        # Has groupId+topicId → routes to group endpoint
+        adapter._client.push_group_text.assert_called_once_with("g1", "t1", "hello")
+        adapter._client.push_text.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1408,20 +1412,28 @@ class TestGroupSendRouting:
     """Tests for routing outbound sends to group/topic endpoints."""
 
     def test_is_group_chat_dm_returns_false(self):
-        """DM routing returns False for _is_group_chat."""
+        """Bare uid (no groupId/topicId) returns False for _is_group_chat."""
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._session_routing = {
-            "sid1": {"uid": "u1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+            "user1": {"uid": "user1", "groupId": "", "topicId": "", "groupType": "direct_chat"},
         }
-        assert adapter._is_group_chat("sid1") is False
+        assert adapter._is_group_chat("user1") is False
+
+    def test_is_group_chat_topic_returns_true(self):
+        """Routing with groupId+topicId returns True even if groupType is direct_chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {
+            "g1_t1": {"uid": "u1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+        }
+        assert adapter._is_group_chat("g1_t1") is True
 
     def test_is_group_chat_team_returns_true(self):
-        """Team groupType returns True for _is_group_chat."""
+        """Team groupType with groupId+topicId returns True for _is_group_chat."""
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._session_routing = {
-            "sid2": {"uid": "u1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+            "g2_t2": {"uid": "u1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
         }
-        assert adapter._is_group_chat("sid2") is True
+        assert adapter._is_group_chat("g2_t2") is True
 
     def test_is_group_chat_unknown_returns_false(self):
         """Unknown chat_id returns False for _is_group_chat."""
@@ -1451,11 +1463,11 @@ class TestGroupSendRouting:
 
     @pytest.mark.asyncio
     async def test_send_text_dm_uses_direct_endpoint(self):
-        """send() routes to push_text for DM chat."""
+        """send() routes to push_text for bare uid (no groupId/topicId)."""
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
         adapter._session_routing = {
-            "g1_t1": {"uid": "user_1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+            "user_1": {"uid": "user_1", "groupId": "", "topicId": "", "groupType": "direct_chat"},
         }
         adapter._client = MagicMock(
             push_group_text=AsyncMock(),
@@ -1464,7 +1476,7 @@ class TestGroupSendRouting:
         adapter.message_max_chars = 50_000
         adapter.truncate_message = BasePlatformAdapter.truncate_message
 
-        result = await adapter.send("g1_t1", "hello dm")
+        result = await adapter.send("user_1", "hello dm")
         assert result.success
         adapter._client.push_text.assert_called_once_with("user_1", "hello dm")
         adapter._client.push_group_text.assert_not_called()
@@ -1507,6 +1519,31 @@ class TestGroupSendRouting:
         )
 
         result = await adapter.send_document("g2_t2", str(doc))
+        assert result.success
+        adapter._client.push_group_file.assert_called_once()
+        adapter._client.push_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_document_routes_direct_chat_topic_to_group(self, tmp_path):
+        """send_document() routes to group endpoint even when groupType is direct_chat.
+
+        Eko sets groupType='direct_chat' even for topics inside DM-type groups.
+        The routing must be based on groupId+topicId presence, not groupType.
+        """
+        doc = tmp_path / "notes.md"
+        doc.write_bytes(b"# notes")
+
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g1_t1": {"uid": "user_1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+        }
+        adapter._client = MagicMock(
+            push_group_file=AsyncMock(),
+            push_file=AsyncMock(),
+        )
+
+        result = await adapter.send_document("g1_t1", str(doc))
         assert result.success
         adapter._client.push_group_file.assert_called_once()
         adapter._client.push_file.assert_not_called()
