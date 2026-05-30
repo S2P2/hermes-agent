@@ -1812,6 +1812,20 @@ async def _send_eko_media(pconfig, chat_id, chunks, media_files):
 
     logger.info("Eko _send_eko_media: adapter=%s media_files=%d", adapter is not None, len(media_files or []))
 
+    if adapter is not None:
+        # If the chat_id has no routing metadata (e.g. bare uid from home
+        # channel), try the current session's chat_id from the gateway
+        # context — this is the topic/group the user is actively chatting in.
+        if not adapter._get_routing(chat_id):
+            try:
+                from gateway.session_context import get_session_env
+                session_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+                if session_chat_id and adapter._get_routing(session_chat_id):
+                    logger.info("Eko _send_eko_media: remapped chat_id %s -> %s from session context", chat_id, session_chat_id)
+                    chat_id = session_chat_id
+            except Exception:
+                pass
+
     if adapter is None:
         # No live adapter — route through standalone sender which now
         # supports media_files via push_picture/push_file.
