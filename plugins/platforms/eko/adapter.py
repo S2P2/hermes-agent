@@ -778,6 +778,11 @@ class EkoAdapter(BasePlatformAdapter):
         if not chunks:
             return SendResult(success=True)
 
+        # Filter out empty chunks (can happen when message is only MEDIA: tags).
+        chunks = [c for c in chunks if c.strip()]
+        if not chunks:
+            return SendResult(success=True)
+
         last_result = SendResult(success=True)
         for i, chunk in enumerate(chunks):
             if i == 0:

@@ -1814,6 +1814,8 @@ async def _send_eko_media(pconfig, chat_id, chunks, media_files):
         # supports media_files via push_picture/push_file.
         last_result = None
         for i, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
             is_last = (i == len(chunks) - 1)
             from gateway.config import Platform as _Platform
             result = await _send_via_adapter(
@@ -1826,7 +1828,20 @@ async def _send_eko_media(pconfig, chat_id, chunks, media_files):
             if isinstance(result, dict) and result.get("error"):
                 return result
             last_result = result
-        return last_result
+        # If all chunks were empty (media-only), send media via standalone.
+        if last_result is None and media_files:
+            from gateway.config import Platform as _Platform
+            result = await _send_via_adapter(
+                _Platform("eko"),
+                pconfig,
+                chat_id,
+                "",
+                media_files=media_files,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result or {"success": True, "message_id": None}
 
     warnings = []
 
