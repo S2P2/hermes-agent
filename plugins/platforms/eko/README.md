@@ -15,8 +15,10 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 - Interactive setup wizard (`hermes gateway setup`)
 - Webhook signature verification (`X-Eko-Signature` HMAC-SHA256)
 - Image receiving (download, cache, vision tool integration)
-- Image sending (reply token + push fallback)
-- File sending (push to user)
+- Image sending (reply token + push fallback, DM and group/topic)
+- File sending (push to user or group/topic)
+- Cron media attachments (images and files via standalone sender)
+- Group/topic-aware outbound routing (auto-detects DM vs group)
 
 ## Prerequisites
 
@@ -142,7 +144,8 @@ Eko Server ──webhook──► aiohttp (/eko/webhook) ──► EkoAdapter
                                                   EkoAdapter.send()
                                                        │
                                           1. reply token (if fresh)
-                                          2. push fallback
+                                          2. push to DM (/bot/v1/direct/*)
+                                             or group (/bot/v1/group/*)
 ```
 
 Outbound messages prefer the reply token endpoint (single-use, ~60s TTL).
@@ -162,6 +165,15 @@ the correct user ID.
 | Group chat | `{groupId}_{topicId}` | `group` |
 
 ## Version History
+
+### v1.3.0
+
+- Outbound image/file sending: native multipart upload with correct MIME types
+- Cron media attachments: `_standalone_send()` now sends images and files
+- `send_message` MEDIA support: Eko added to platform allowlist for `MEDIA:<path>` delivery
+- Group/topic outbound routing: auto-detects DM vs group, routes to `/bot/v1/group/*` or `/bot/v1/direct/*`
+- Session context remap: media sends from topics resolve the correct chat_id
+- Platform hint updated with `MEDIA:<path>` syntax
 
 ### v1.2.0
 
@@ -195,12 +207,12 @@ the correct user ID.
 | Feature | Description | Eko API |
 |---------|-------------|--------|
 | Group allowlist | Allow/deny specific groups (currently only user-level allowlist) | Needs testing |
-| Outbound media debugging | `send_image_file`/`send_document` unit tests pass but fail in live testing — needs raw curl investigation | ✅ documented |
 
 ### Medium priority
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
+| Group/topic management | Create groups, create topics, query users | Issue #16, #17 |
 | Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
 
 ### Low priority

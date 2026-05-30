@@ -1189,3 +1189,323 @@ class TestTopicRouting:
         assert result.success
         # push_text should receive the uid, not the session chat_id
         adapter._client.push_text.assert_called_once_with("user_abc", "hello")
+
+
+# ---------------------------------------------------------------------------
+# Standalone send (cron media attachments)
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneSend:
+    """Tests for _standalone_send — out-of-process push for cron jobs."""
+
+    @pytest.mark.asyncio
+    async def test_text_only(self):
+        """Sends text via push_text when no media files."""
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push:
+            result = await _standalone_send(cfg, "user_1", "hello cron")
+        assert result == {"success": True, "message_id": None}
+        mock_push.assert_called_once_with("user_1", "hello cron")
+
+    @pytest.mark.asyncio
+    async def test_missing_config_returns_error(self):
+        """Returns error dict when required config is missing."""
+        cfg = _make_config({})
+        result = await _standalone_send(cfg, "user_1", "hello")
+        assert "error" in result
+        assert "missing config" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_missing_chat_id_returns_error(self):
+        """Returns error dict when chat_id is empty."""
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        result = await _standalone_send(cfg, "", "hello")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_push_failure_returns_error(self):
+        """Returns error when push_text raises."""
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock, side_effect=RuntimeError("API error")):
+            result = await _standalone_send(cfg, "user_1", "hello")
+        assert "error" in result
+        assert "API error" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_sends_image_media(self, tmp_path):
+        """Sends image files via push_picture."""
+        img = tmp_path / "photo.jpg"
+        img.write_bytes(b"\xff\xd8\xff\xe0fake-jpg")
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push, \
+             patch.object(_EkoClient, "push_picture", new_callable=AsyncMock) as mock_pic:
+            result = await _standalone_send(
+                cfg, "user_1", "see attached",
+                media_files=[str(img)],
+            )
+        assert result["success"] is True
+        mock_push.assert_called_once_with("user_1", "see attached")
+        mock_pic.assert_called_once_with("user_1", b"\xff\xd8\xff\xe0fake-jpg", "photo.jpg")
+
+    @pytest.mark.asyncio
+    async def test_sends_document_media(self, tmp_path):
+        """Sends non-image files via push_file."""
+        doc = tmp_path / "report.pdf"
+        doc.write_bytes(b"%PDF-1.4-fake")
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push, \
+             patch.object(_EkoClient, "push_file", new_callable=AsyncMock) as mock_file:
+            result = await _standalone_send(
+                cfg, "user_1", "report attached",
+                media_files=[str(doc)],
+            )
+        assert result["success"] is True
+        mock_push.assert_called_once_with("user_1", "report attached")
+        mock_file.assert_called_once_with("user_1", b"%PDF-1.4-fake", "report.pdf")
+
+    @pytest.mark.asyncio
+    async def test_force_document_sends_image_as_file(self, tmp_path):
+        """force_document=True sends image files via push_file instead of push_picture."""
+        img = tmp_path / "photo.png"
+        img.write_bytes(b"\x89PNG\r\nfake-png")
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock), \
+             patch.object(_EkoClient, "push_file", new_callable=AsyncMock) as mock_file, \
+             patch.object(_EkoClient, "push_picture", new_callable=AsyncMock) as mock_pic:
+            result = await _standalone_send(
+                cfg, "user_1", "see doc",
+                media_files=[str(img)],
+                force_document=True,
+            )
+        assert result["success"] is True
+        mock_file.assert_called_once()
+        mock_pic.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_media_warns(self, tmp_path):
+        """Missing media file produces a warning instead of failing."""
+        bad_path = str(tmp_path / "nonexistent.jpg")
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push:
+            result = await _standalone_send(
+                cfg, "user_1", "text",
+                media_files=[bad_path],
+            )
+        assert result["success"] is True
+        assert "warnings" in result
+        assert len(result["warnings"]) == 1
+        mock_push.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_media_send_failure_warns(self, tmp_path):
+        """Failed push_picture produces a warning, doesn't fail the whole send."""
+        img = tmp_path / "photo.jpg"
+        img.write_bytes(b"fake")
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock), \
+             patch.object(_EkoClient, "push_picture", new_callable=AsyncMock, side_effect=RuntimeError("upload failed")):
+            result = await _standalone_send(
+                cfg, "user_1", "text",
+                media_files=[str(img)],
+            )
+        assert result["success"] is True
+        assert "warnings" in result
+        assert "upload failed" in result["warnings"][0]
+
+    @pytest.mark.asyncio
+    async def test_multiple_media_files(self, tmp_path):
+        """Sends multiple media files of different types."""
+        img = tmp_path / "a.jpg"
+        img.write_bytes(b"img-data")
+        doc = tmp_path / "b.pdf"
+        doc.write_bytes(b"doc-data")
+        png = tmp_path / "c.png"
+        png.write_bytes(b"png-data")
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock), \
+             patch.object(_EkoClient, "push_picture", new_callable=AsyncMock) as mock_pic, \
+             patch.object(_EkoClient, "push_file", new_callable=AsyncMock) as mock_file:
+            result = await _standalone_send(
+                cfg, "user_1", "multi",
+                media_files=[str(img), str(doc), str(png)],
+            )
+        assert result["success"] is True
+        assert mock_pic.call_count == 2  # .jpg and .png
+        assert mock_file.call_count == 1  # .pdf
+
+    @pytest.mark.asyncio
+    async def test_empty_message_with_media(self, tmp_path):
+        """Sends media even when text message is empty."""
+        img = tmp_path / "photo.jpg"
+        img.write_bytes(b"img")
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push, \
+             patch.object(_EkoClient, "push_picture", new_callable=AsyncMock) as mock_pic:
+            result = await _standalone_send(
+                cfg, "user_1", "",
+                media_files=[str(img)],
+            )
+        assert result["success"] is True
+        mock_push.assert_not_called()  # empty message skips push_text
+        mock_pic.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Group/topic send routing
+# ---------------------------------------------------------------------------
+
+
+class TestGroupSendRouting:
+    """Tests for routing outbound sends to group/topic endpoints."""
+
+    def test_is_group_chat_dm_returns_false(self):
+        """DM routing returns False for _is_group_chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {
+            "sid1": {"uid": "u1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+        }
+        assert adapter._is_group_chat("sid1") is False
+
+    def test_is_group_chat_team_returns_true(self):
+        """Team groupType returns True for _is_group_chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {
+            "sid2": {"uid": "u1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        assert adapter._is_group_chat("sid2") is True
+
+    def test_is_group_chat_unknown_returns_false(self):
+        """Unknown chat_id returns False for _is_group_chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {}
+        assert adapter._is_group_chat("unknown") is False
+
+    @pytest.mark.asyncio
+    async def test_send_text_uses_group_endpoint(self):
+        """send() routes to push_group_text for team chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        adapter._client = MagicMock(
+            push_group_text=AsyncMock(),
+            push_text=AsyncMock(),
+        )
+        adapter.message_max_chars = 50_000
+        adapter.truncate_message = BasePlatformAdapter.truncate_message
+
+        result = await adapter.send("g2_t2", "hello group")
+        assert result.success
+        adapter._client.push_group_text.assert_called_once_with("g2", "t2", "hello group")
+        adapter._client.push_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_text_dm_uses_direct_endpoint(self):
+        """send() routes to push_text for DM chat."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g1_t1": {"uid": "user_1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+        }
+        adapter._client = MagicMock(
+            push_group_text=AsyncMock(),
+            push_text=AsyncMock(),
+        )
+        adapter.message_max_chars = 50_000
+        adapter.truncate_message = BasePlatformAdapter.truncate_message
+
+        result = await adapter.send("g1_t1", "hello dm")
+        assert result.success
+        adapter._client.push_text.assert_called_once_with("user_1", "hello dm")
+        adapter._client.push_group_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_uses_group_endpoint(self, tmp_path):
+        """send_image_file() routes to push_group_picture for team chat."""
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\nfake")
+
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        adapter._client = MagicMock(
+            push_group_picture=AsyncMock(),
+            push_picture=AsyncMock(),
+        )
+
+        result = await adapter.send_image_file("g2_t2", str(img))
+        assert result.success
+        adapter._client.push_group_picture.assert_called_once()
+        adapter._client.push_picture.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_document_uses_group_endpoint(self, tmp_path):
+        """send_document() routes to push_group_file for team chat."""
+        doc = tmp_path / "report.pdf"
+        doc.write_bytes(b"%PDF-fake")
+
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+        }
+        adapter._client = MagicMock(
+            push_group_file=AsyncMock(),
+            push_file=AsyncMock(),
+        )
+
+        result = await adapter.send_document("g2_t2", str(doc))
+        assert result.success
+        adapter._client.push_group_file.assert_called_once()
+        adapter._client.push_file.assert_not_called()
