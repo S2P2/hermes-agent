@@ -1809,6 +1809,8 @@ async def _send_eko_media(pconfig, chat_id, chunks, media_files):
     except Exception:
         adapter = None
 
+    logger.info("Eko _send_eko_media: adapter=%s media_files=%d", adapter is not None, len(media_files or []))
+
     if adapter is None:
         # No live adapter — route through standalone sender which now
         # supports media_files via push_picture/push_file.
@@ -1866,12 +1868,16 @@ async def _send_eko_media(pconfig, chat_id, chunks, media_files):
         ext = os.path.splitext(media_path)[1].lower()
         try:
             if ext in _IMAGE_EXTS:
+                logger.info("Eko _send_eko_media: sending image %s to %s", media_path, chat_id)
                 result = await adapter.send_image_file(chat_id, media_path)
             else:
+                logger.info("Eko _send_eko_media: sending document %s to %s", media_path, chat_id)
                 result = await adapter.send_document(chat_id, media_path)
+            logger.info("Eko _send_eko_media: send result success=%s error=%s", result.success, getattr(result, 'error', None))
             if not result.success:
                 warnings.append(f"Failed to send {os.path.basename(media_path)}: {result.error}")
         except Exception as e:
+            logger.warning("Eko _send_eko_media: exception sending %s: %s", media_path, e)
             warnings.append(f"Failed to send {os.path.basename(media_path)}: {e}")
 
     if last_result is None:
