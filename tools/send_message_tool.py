@@ -749,11 +749,15 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- Eko: media delivery via live adapter's send_image_file/send_document ---
+    if platform.value == "eko" and media_files:
+        return await _send_eko_media(pconfig, chat_id, chunks, media_files)
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and eko; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -761,7 +765,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and eko"
         )
 
     last_result = None
@@ -1785,6 +1789,80 @@ async def _send_yuanbao(chat_id, message, media_files=None):
         return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)
     except Exception as e:
         return _error(f"Yuanbao send failed: {e}")
+
+
+async def _send_eko_media(pconfig, chat_id, chunks, media_files):
+    """Send text + media to Eko via the live gateway adapter.
+
+    Routes through the running EkoAdapter's ``send()`` for text and
+    ``send_image_file()`` / ``send_document()`` for attachments.
+    Falls back to ``_send_via_adapter`` if no live adapter is available.
+    """
+    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+    adapter = None
+    try:
+        from gateway.run import _gateway_runner_ref
+        runner = _gateway_runner_ref()
+        if runner:
+            adapter = runner.adapters.get("eko")
+    except Exception:
+        adapter = None
+
+    if adapter is None:
+        # No live adapter — route through standalone sender which now
+        # supports media_files via push_picture/push_file.
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_via_adapter(
+                Platform("eko"),
+                pconfig,
+                chat_id,
+                chunk,
+                media_files=media_files if is_last else None,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
+
+    warnings = []
+
+    # Send text chunks.
+    last_result = None
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        try:
+            result = await adapter.send(chat_id=chat_id, content=chunk)
+            if not result.success:
+                return {"error": f"Eko send failed: {result.error}"}
+            last_result = {"success": True, "message_id": result.message_id}
+        except Exception as e:
+            return {"error": f"Eko send failed: {e}"}
+
+    # Send media attachments.
+    for media_path, _is_voice in media_files:
+        if not os.path.exists(media_path):
+            warnings.append(f"Media file not found: {media_path}")
+            continue
+        ext = os.path.splitext(media_path)[1].lower()
+        try:
+            if ext in _IMAGE_EXTS:
+                result = await adapter.send_image_file(chat_id, media_path)
+            else:
+                result = await adapter.send_document(chat_id, media_path)
+            if not result.success:
+                warnings.append(f"Failed to send {os.path.basename(media_path)}: {result.error}")
+        except Exception as e:
+            warnings.append(f"Failed to send {os.path.basename(media_path)}: {e}")
+
+    if last_result is None:
+        last_result = {"success": True, "message_id": None}
+    if warnings:
+        last_result["warnings"] = warnings
+    return last_result
 
 
 # --- Registry ---
