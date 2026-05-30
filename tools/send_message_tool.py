@@ -1803,9 +1803,10 @@ async def _send_eko_media(pconfig, chat_id, chunks, media_files):
     adapter = None
     try:
         from gateway.run import _gateway_runner_ref
+        from gateway.config import Platform as _Platform
         runner = _gateway_runner_ref()
         if runner:
-            adapter = runner.adapters.get("eko")
+            adapter = runner.adapters.get(_Platform("eko"))
     except Exception:
         adapter = None
 
