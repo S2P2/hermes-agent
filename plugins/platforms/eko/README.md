@@ -156,7 +156,13 @@ When the token is absent or expired, the adapter falls back to the push API.
 Each Eko conversation (DM or topic) gets its own Hermes session. The adapter
 uses the webhook `sessionId` (`{groupId}_{topicId}`) as the `chat_id`. Routing
 metadata (uid, groupId, topicId) is stored so outbound push calls can resolve
-the correct user ID.
+the correct endpoint.
+
+**Outbound routing** is determined by the presence of `groupId` + `topicId` —
+not by `groupType`. Eko sets `groupType: "direct_chat"` even for topics inside
+DM-type groups, so any conversation with both `groupId` and `topicId` uses the
+`/bot/v1/group/*` endpoints. Bare uid routing (no groupId/topicId) falls back
+to `/bot/v1/direct/*`.
 
 | Eko source | chat_id | chat_type |
 |------------|---------|----------|
@@ -165,6 +171,15 @@ the correct user ID.
 | Group chat | `{groupId}_{topicId}` | `group` |
 
 ## Version History
+
+### v1.3.1
+
+- **Fixed document/file routing to topics.** Eko sets `groupType: "direct_chat"` even for
+  topics inside DM-type groups. Routing now checks for `groupId`+`topicId` presence instead of
+  `groupType`, so all topic-bound messages (text, images, files) correctly use `/bot/v1/group/*`
+  endpoints regardless of the group's type classification.
+- `_standalone_send` (cron path) now supports group/topic routing via live adapter lookup.
+- Debug logging for `send_document` routing decisions.
 
 ### v1.3.0
 

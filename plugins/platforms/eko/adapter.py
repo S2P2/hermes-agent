@@ -769,10 +769,6 @@ class EkoAdapter(BasePlatformAdapter):
             "topicId": topic_id,
             "groupType": group_type,
         }
-        logger.info(
-            "[eko] routing stored chat_id=%s groupType=%s groupId=%s topicId=%s",
-            chat_id, group_type, group_id, topic_id,
-        )
 
         # Stash the reply token keyed by chat_id.
         if chat_id and reply_token:
@@ -932,19 +928,11 @@ class EkoAdapter(BasePlatformAdapter):
         groups, so we cannot rely on it to distinguish DM from topic routing.
         """
         routing = self._get_routing(chat_id)
-        result = bool(
+        return bool(
             routing
             and routing.get("groupId")
             and routing.get("topicId")
         )
-        logger.info(
-            "[eko] _is_group_chat chat_id=%s gid=%s tid=%s result=%s",
-            chat_id,
-            routing.get("groupId") if routing else None,
-            routing.get("topicId") if routing else None,
-            result,
-        )
-        return result
 
     async def _send_reply_or_push(
         self, chat_id: str, content: str
@@ -1144,26 +1132,13 @@ class EkoAdapter(BasePlatformAdapter):
         routing = self._get_routing(chat_id)
         is_group = self._is_group_chat(chat_id)
 
-        logger.info(
-            "[eko] send_document chat_id=%s uid=%s is_group=%s",
-            chat_id, uid, is_group,
-        )
-
         async def _do_push_file():
             if is_group and routing:
-                logger.info(
-                    "[eko] push_group_file gid=%s tid=%s filename=%s size=%d",
-                    routing["groupId"], routing["topicId"], filename, len(file_bytes),
-                )
                 await self._client.push_group_file(
                     routing["groupId"], routing["topicId"],
                     file_bytes, filename,
                 )
             else:
-                logger.info(
-                    "[eko] push_file uid=%s filename=%s size=%d",
-                    uid, filename, len(file_bytes),
-                )
                 await self._client.push_file(uid, file_bytes, filename)
 
         # No reply-token endpoint documented for files — always push.
