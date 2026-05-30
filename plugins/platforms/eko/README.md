@@ -6,7 +6,7 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 
 ## Features
 
-- 1:1 direct message support
+- 1:1 direct message and topic support (each topic gets its own session)
 - OAuth2 client-credentials authentication with proactive token refresh
 - Reply token (free) with automatic push fallback
 - Event deduplication
@@ -148,7 +148,27 @@ Eko Server ──webhook──► aiohttp (/eko/webhook) ──► EkoAdapter
 Outbound messages prefer the reply token endpoint (single-use, ~60s TTL).
 When the token is absent or expired, the adapter falls back to the push API.
 
+### Session Routing
+
+Each Eko conversation (DM or topic) gets its own Hermes session. The adapter
+uses the webhook `sessionId` (`{groupId}_{topicId}`) as the `chat_id`. Routing
+metadata (uid, groupId, topicId) is stored so outbound push calls can resolve
+the correct user ID.
+
+| Eko source | chat_id | chat_type |
+|------------|---------|----------|
+| DM (main topic) | `{groupId}_{topicId}` | `dm` |
+| DM (new topic) | `{groupId}_{topicId}` | `dm` |
+| Group chat | `{groupId}_{topicId}` | `group` |
+
 ## Version History
+
+### v1.2.0
+
+- Topic/session routing: each Eko topic gets its own Hermes session
+- Group message `chat_type` derived from `groupType` field
+- Push fallback resolves user uid from session routing metadata
+- Reply tokens stashed per session (not per user)
 
 ### v1.1.0
 
@@ -174,7 +194,8 @@ When the token is absent or expired, the adapter falls back to the push API.
 
 | Feature | Description | Eko API |
 |---------|-------------|--------|
-| Group chat support | Route group messages with `gid`/`tid`, group allowlist, `send_image`/`send_document` to groups | ✅ documented |
+| Group allowlist | Allow/deny specific groups (currently only user-level allowlist) | Needs testing |
+| Outbound media debugging | `send_image_file`/`send_document` unit tests pass but fail in live testing — needs raw curl investigation | ✅ documented |
 
 ### Medium priority
 

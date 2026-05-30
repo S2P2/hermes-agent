@@ -130,6 +130,7 @@ class TestReplyTokenStash:
     def test_no_token_returns_empty(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         token, used = adapter._consume_reply_token("chat1")
         assert token == ""
         assert not used
@@ -175,6 +176,7 @@ class TestSendRouting:
     def _make_routing_adapter(**overrides):
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = overrides.get("_reply_tokens", {})
+        adapter._session_routing = overrides.get("_session_routing", {})
         adapter._client = overrides.get("_client", MagicMock())
         adapter.message_max_chars = overrides.get("message_max_chars", 50_000)
         adapter.truncate_message = BasePlatformAdapter.truncate_message
@@ -273,6 +275,7 @@ class TestSendChunking:
     def _make_adapter(self, max_chars: int = 10) -> EkoAdapter:
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         adapter._client = MagicMock()
         adapter._client.push_text = AsyncMock()
         adapter._client.reply_text = AsyncMock()
@@ -670,6 +673,7 @@ class TestInboundPicture:
         fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
         adapter._client.fetch_picture = AsyncMock(return_value=fake_png)
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         adapter._bot_user_id = None
         adapter.reply_token_ttl = 50
         adapter.handle_message = AsyncMock()
@@ -713,6 +717,7 @@ class TestInboundPicture:
             side_effect=RuntimeError("download failed")
         )
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         adapter._bot_user_id = None
         adapter.reply_token_ttl = 50
         adapter.handle_message = AsyncMock()
@@ -741,6 +746,7 @@ class TestInboundPicture:
     async def test_sticker_surfaces_placeholder(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         adapter._bot_user_id = None
         adapter.reply_token_ttl = 50
         adapter.handle_message = AsyncMock()
@@ -787,6 +793,7 @@ class TestOutboundMedia:
     async def test_send_image_file_falls_back_to_push(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         adapter._client = MagicMock()
         adapter._client.push_picture = AsyncMock()
 
@@ -804,6 +811,7 @@ class TestOutboundMedia:
     async def test_send_image_downloads_and_delegates(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         adapter._client = MagicMock()
         adapter._client.push_picture = AsyncMock()
 
@@ -817,6 +825,7 @@ class TestOutboundMedia:
     async def test_send_document_pushes_file(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {}
+        adapter._session_routing = {}
         adapter._client = MagicMock()
         adapter._client.push_file = AsyncMock()
 
@@ -953,3 +962,230 @@ class TestWebhookSignatureNormalization:
         body = b'{"events":[]}'
         sig = _sign_body("my_oauth_secret", body)
         assert adapter._verify_signature(body, f"  sha256={sig}  ")
+
+
+# ---------------------------------------------------------------------------
+# Topic / session routing
+# ---------------------------------------------------------------------------
+
+
+class TestTopicRouting:
+    """Verify that DM and topic messages get separate sessions."""
+
+    @staticmethod
+    def _make_adapter():
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {}
+        adapter._client = MagicMock()
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_dm_uses_session_id_as_chat_id(self):
+        """DM message uses sessionId as chat_id (not sender uid)."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_dm",
+            "type": "message",
+            "source": {
+                "type": "user",
+                "userId": "user_abc",
+                "username": "alice",
+            },
+            "message": {
+                "id": "msg_dm",
+                "type": "text",
+                "groupId": "grp_1",
+                "groupType": "direct_chat",
+                "topicId": "topic_dm",
+                "text": "hello from DM",
+            },
+            "sessionId": "grp_1_topic_dm",
+        }
+
+        await adapter._handle_message_event(event)
+
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.source.chat_id == "grp_1_topic_dm"
+        assert call_args.source.chat_type == "dm"
+
+    @pytest.mark.asyncio
+    async def test_topic_gets_separate_session(self):
+        """A different topic in the same chat gets a different chat_id."""
+        adapter = self._make_adapter()
+
+        dm_event = {
+            "replyToken": "tok_dm",
+            "type": "message",
+            "source": {
+                "type": "user",
+                "userId": "user_abc",
+                "username": "alice",
+            },
+            "message": {
+                "id": "msg_dm",
+                "type": "text",
+                "groupId": "grp_1",
+                "groupType": "direct_chat",
+                "topicId": "topic_main",
+                "text": "DM main topic",
+            },
+            "sessionId": "grp_1_topic_main",
+        }
+
+        topic_event = {
+            "replyToken": "tok_topic",
+            "type": "message",
+            "source": {
+                "type": "user",
+                "userId": "user_abc",
+                "username": "alice",
+            },
+            "message": {
+                "id": "msg_topic",
+                "type": "text",
+                "groupId": "grp_1",
+                "groupType": "direct_chat",
+                "topicId": "topic_new",
+                "text": "new topic message",
+            },
+            "sessionId": "grp_1_topic_new",
+        }
+
+        await adapter._handle_message_event(dm_event)
+        await adapter._handle_message_event(topic_event)
+
+        dm_call = adapter.handle_message.call_args_list[0][0][0]
+        topic_call = adapter.handle_message.call_args_list[1][0][0]
+
+        assert dm_call.source.chat_id == "grp_1_topic_main"
+        assert topic_call.source.chat_id == "grp_1_topic_new"
+        assert dm_call.source.chat_id != topic_call.source.chat_id
+
+    @pytest.mark.asyncio
+    async def test_group_type_group_sets_chat_type(self):
+        """Messages with groupType != direct_chat get chat_type='group'."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_grp",
+            "type": "message",
+            "source": {
+                "type": "user",
+                "userId": "user_abc",
+                "username": "alice",
+            },
+            "message": {
+                "id": "msg_grp",
+                "type": "text",
+                "groupId": "grp_team",
+                "groupType": "team",
+                "topicId": "topic_gen",
+                "text": "team message",
+            },
+            "sessionId": "grp_team_topic_gen",
+        }
+
+        await adapter._handle_message_event(event)
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.source.chat_type == "group"
+
+    @pytest.mark.asyncio
+    async def test_routing_metadata_stored(self):
+        """Routing metadata is stored for push fallback resolution."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_1",
+            "type": "message",
+            "source": {
+                "type": "user",
+                "userId": "user_abc",
+                "username": "alice",
+            },
+            "message": {
+                "id": "msg_1",
+                "type": "text",
+                "groupId": "g1",
+                "groupType": "direct_chat",
+                "topicId": "t1",
+                "text": "test",
+            },
+            "sessionId": "g1_t1",
+        }
+
+        await adapter._handle_message_event(event)
+
+        assert "g1_t1" in adapter._session_routing
+        assert adapter._session_routing["g1_t1"]["uid"] == "user_abc"
+        assert adapter._session_routing["g1_t1"]["groupId"] == "g1"
+        assert adapter._session_routing["g1_t1"]["topicId"] == "t1"
+
+    @pytest.mark.asyncio
+    async def test_reply_token_stashed_per_session(self):
+        """Reply tokens are stashed per session chat_id, not per uid."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_session",
+            "type": "message",
+            "source": {
+                "type": "user",
+                "userId": "user_abc",
+                "username": "alice",
+            },
+            "message": {
+                "id": "msg_1",
+                "type": "text",
+                "groupId": "g1",
+                "groupType": "direct_chat",
+                "topicId": "t1",
+                "text": "test",
+            },
+            "sessionId": "g1_t1",
+        }
+
+        await adapter._handle_message_event(event)
+        assert "g1_t1" in adapter._reply_tokens
+        assert "user_abc" not in adapter._reply_tokens
+
+    def test_resolve_uid_with_routing(self):
+        """_resolve_uid returns uid from routing metadata."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {
+            "g1_t1": {"uid": "user_abc", "groupId": "g1", "topicId": "t1"},
+        }
+        assert adapter._resolve_uid("g1_t1") == "user_abc"
+
+    def test_resolve_uid_without_routing_falls_back(self):
+        """_resolve_uid falls back to chat_id when no routing entry."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {}
+        assert adapter._resolve_uid("user_abc") == "user_abc"
+
+    def test_resolve_uid_without_attr_falls_back(self):
+        """_resolve_uid handles missing _session_routing attribute."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter._resolve_uid("user_abc") == "user_abc"
+
+    @pytest.mark.asyncio
+    async def test_send_resolves_uid_for_push(self):
+        """send() uses _resolve_uid for push_text, not the session chat_id."""
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {
+            "g1_t1": {"uid": "user_abc", "groupId": "g1", "topicId": "t1"},
+        }
+        adapter._client = MagicMock(push_text=AsyncMock())
+        adapter.message_max_chars = 50_000
+        adapter.truncate_message = BasePlatformAdapter.truncate_message
+
+        result = await adapter.send("g1_t1", "hello")
+        assert result.success
+        # push_text should receive the uid, not the session chat_id
+        adapter._client.push_text.assert_called_once_with("user_abc", "hello")

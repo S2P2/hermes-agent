@@ -437,6 +437,9 @@ class EkoAdapter(BasePlatformAdapter):
         self._site = None  # aiohttp.web.TCPSite
         self._reply_tokens: Dict[str, Tuple[str, float]] = {}  # chat_id -> (token, expiry)
         self._dedup = _MessageDeduplicator()
+        # Session routing: maps composite chat_id to Eko routing metadata
+        # so outbound push can resolve uid / groupId / topicId.
+        self._session_routing: Dict[str, Dict[str, str]] = {}
         # Reserved for future self-message filtering if Eko provides
         # a bot identity API.
         self._bot_user_id: Optional[str] = None
@@ -627,9 +630,40 @@ class EkoAdapter(BasePlatformAdapter):
         uid = source.get("userId") or source.get("uid", "")
         username = source.get("username", "") or uid
 
-        # Stash the reply token for outbound use.
-        if uid and reply_token:
-            self._reply_tokens[uid] = (
+        # Build a stable chat_id from groupId + topicId so each Eko
+        # conversation (topic) gets its own Hermes session.
+        group_id = msg.get("groupId", "")
+        topic_id = msg.get("topicId", "")
+        group_type = msg.get("groupType", "")
+        session_id = event.get("sessionId", "")
+
+        if session_id:
+            chat_id = session_id
+        elif group_id and topic_id:
+            chat_id = f"{group_id}_{topic_id}"
+        else:
+            chat_id = uid
+
+        # Determine chat_type from groupType.
+        if group_type == "direct_chat":
+            chat_type = "dm"
+        elif group_type:
+            chat_type = "group"
+        else:
+            chat_type = "dm"
+
+        # Store routing metadata so outbound send can resolve
+        # the user uid for push fallback.
+        self._session_routing[chat_id] = {
+            "uid": uid,
+            "groupId": group_id,
+            "topicId": topic_id,
+            "groupType": group_type,
+        }
+
+        # Stash the reply token keyed by chat_id.
+        if chat_id and reply_token:
+            self._reply_tokens[chat_id] = (
                 reply_token,
                 time.time() + self.reply_token_ttl,
             )
@@ -657,8 +691,8 @@ class EkoAdapter(BasePlatformAdapter):
             text = f"[unsupported message type: {msg_type}]"
 
         source_obj = self.build_source(
-            chat_id=uid,
-            chat_type="dm",
+            chat_id=chat_id,
+            chat_type=chat_type,
             user_id=uid,
             user_name=username,
             chat_name=username,
@@ -756,10 +790,21 @@ class EkoAdapter(BasePlatformAdapter):
                 return last_result
         return last_result
 
+    def _resolve_uid(self, chat_id: str) -> str:
+        """Resolve the Eko user uid for push delivery.
+
+        chat_id may be a sessionId (groupId_topicId) or a plain uid.
+        """
+        routing = self._session_routing.get(chat_id) if hasattr(self, '_session_routing') else None
+        if routing:
+            return routing.get("uid", chat_id)
+        return chat_id
+
     async def _send_reply_or_push(
         self, chat_id: str, content: str
     ) -> SendResult:
         """Send content using reply token first, push as fallback."""
+        uid = self._resolve_uid(chat_id)
         token, used_reply = self._consume_reply_token(chat_id)
         if used_reply:
             try:
@@ -768,7 +813,7 @@ class EkoAdapter(BasePlatformAdapter):
             except _EkoAuthError:
                 # Token expired or invalid - retry with fresh auth + push.
                 try:
-                    await self._client.push_text(chat_id, content)
+                    await self._client.push_text(uid, content)
                     return SendResult(success=True, message_id=None)
                 except Exception as exc2:
                     logger.error("Eko: push after 401 failed: %s", exc2)
@@ -780,12 +825,12 @@ class EkoAdapter(BasePlatformAdapter):
                 # Fall through to push.
 
         try:
-            await self._client.push_text(chat_id, content)
+            await self._client.push_text(uid, content)
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             # Retry once with fresh token.
             try:
-                await self._client.push_text(chat_id, content)
+                await self._client.push_text(uid, content)
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
                 return SendResult(success=False, error=str(exc2))
@@ -800,12 +845,13 @@ class EkoAdapter(BasePlatformAdapter):
         self, chat_id: str, content: str
     ) -> SendResult:
         """Send content via push API only (for chunk N+1)."""
+        uid = self._resolve_uid(chat_id)
         try:
-            await self._client.push_text(chat_id, content)
+            await self._client.push_text(uid, content)
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             try:
-                await self._client.push_text(chat_id, content)
+                await self._client.push_text(uid, content)
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
                 return SendResult(success=False, error=str(exc2))
@@ -838,6 +884,7 @@ class EkoAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Cannot read image: {exc}")
 
         filename = Path(image_path).name or "image.jpg"
+        uid = self._resolve_uid(chat_id)
 
         # Try reply token first, fall back to push.
         token, used_reply = self._consume_reply_token(chat_id)
@@ -848,7 +895,7 @@ class EkoAdapter(BasePlatformAdapter):
             except _EkoAuthError:
                 try:
                     await self._client.push_picture(
-                        chat_id, file_bytes, filename, caption=caption or ""
+                        uid, file_bytes, filename, caption=caption or ""
                     )
                     return SendResult(success=True, message_id=None)
                 except Exception as exc2:
@@ -858,13 +905,13 @@ class EkoAdapter(BasePlatformAdapter):
 
         try:
             await self._client.push_picture(
-                chat_id, file_bytes, filename, caption=caption or ""
+                uid, file_bytes, filename, caption=caption or ""
             )
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             try:
                 await self._client.push_picture(
-                    chat_id, file_bytes, filename, caption=caption or ""
+                    uid, file_bytes, filename, caption=caption or ""
                 )
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
@@ -921,14 +968,15 @@ class EkoAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Cannot read file: {exc}")
 
         filename = file_name or Path(file_path).name or "document"
+        uid = self._resolve_uid(chat_id)
 
         # No reply-token endpoint documented for files — always push.
         try:
-            await self._client.push_file(chat_id, file_bytes, filename)
+            await self._client.push_file(uid, file_bytes, filename)
             return SendResult(success=True, message_id=None)
         except _EkoAuthError:
             try:
-                await self._client.push_file(chat_id, file_bytes, filename)
+                await self._client.push_file(uid, file_bytes, filename)
                 return SendResult(success=True, message_id=None)
             except Exception as exc2:
                 return SendResult(success=False, error=str(exc2))
