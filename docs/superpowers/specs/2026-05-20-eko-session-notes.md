@@ -21,6 +21,7 @@
   - Check if file size limits or content-type headers are causing rejections
   - May need to test the exact curl equivalent against the real Eko API
   - Platform hint updated but LLM may not be triggering the `MEDIA:` path correctly
+- **Cron media attachments** — `_standalone_send()` ignores `media_files` parameter (Issue #3)
 
 **Bug fixed during testing:**
 - Eko OAuth endpoint requires `application/x-www-form-urlencoded`, not JSON.
@@ -59,12 +60,14 @@ Default PR repo → S2P2/hermes-agent
 ## Next Steps (see README roadmap)
 
 1. ~~**Image/file receiving + sending**~~ **Inbound done; outbound needs debugging** — inbound pictures work (vision model interprets them). Outbound `send_image_file`/`send_document` fail in live testing — needs investigation (see Known Issues above).
-2. **Group chat support** — Eko API supports it; real payload has `groupType`, `groupId`, `topicId`
+2. ~~**Group chat support**~~ **Done (PR #14)** — topic/session routing implemented. Each Eko topic gets its own Hermes session via `sessionId`. Group `chat_type` support added.
 3. ~~**Webhook signature verification**~~ **Done (merged to main)**
 4. Run `pytest tests/gateway/test_eko_plugin.py` to validate tests
 5. Tune reply token TTL
 6. **Populate `_bot_user_id`** from `meta.botId` — enables self-message filtering
-7. **Use `sessionId`** for Hermes session grouping (format: `{groupId}_{topicId}`)
+7. ~~**Use `sessionId`** for Hermes session grouping~~ **Done (PR #14)** — format: `{groupId}_{topicId}`
+8. **Cron media attachments** — `_standalone_send()` should send `media_files` via `push_picture`/`push_file` (Issue #3)
+9. **Group allowlist** — currently only user-level allowlist; need group-level gating for non-DM groups
 
 ## Eko API Quirks
 
@@ -102,6 +105,6 @@ Default PR repo → S2P2/hermes-agent
 | `meta` | event | Contains `botId`, `networkId`, `clientId`, `userId` (bot operator) |
 | `meta.deep_research` | event.meta | Boolean flag — purpose unknown, always `false` so far |
 | `message.groupId` | event.message | Chat/conversation ID — useful for group chat routing |
-| `message.groupType` | event.message | `"direct_chat"` for DMs, likely `"group_chat"` for groups |
+| `message.groupType` | event.message | `"direct_chat"` for DMs, `"team"` for group chats |
 | `message.topicId` | event.message | Topic (thread) within the group |
-| `sessionId` | event | Composite `{groupId}_{topicId}` — natural Hermes session key |
+| `sessionId` | event | Composite `{groupId}_{topicId}` — **now used as Hermes chat_id** (PR #14) |
