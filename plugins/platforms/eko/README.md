@@ -172,6 +172,11 @@ to `/bot/v1/direct/*`.
 
 ## Version History
 
+### v1.5.0
+
+- **Agent tools for group/topic management.** `eko_create_group`, `eko_create_topic`, `eko_query_users` registered as async Hermes tools (Issue #17). Gated on Eko adapter being connected. `eko_create_group` accepts usernames (auto-resolves via `eko_query_users`) or raw user IDs.
+- 16 new tool tests (131 total, up from 115).
+
 ### v1.4.0
 
 - **Management API methods on `_EkoClient`.** Added `create_group(uids, name)`, `create_topic(gid, name)`, and `query_users(username)` for programmatic group/topic creation and user lookup (Issue #16).
@@ -244,7 +249,7 @@ All methods follow the standard pattern: Bearer auth via `ensure_token()`, 401 â
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Agent tools for management | Expose create_group, create_topic, query_users as agent tools | Issue #17 (blocked by #16, which is done) |
+| Agent tools for management | Expose create_group, create_topic, query_users as agent tools | Issue #17 â€” **Done** |
 | Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
 
 ### Low priority

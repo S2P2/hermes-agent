@@ -321,6 +321,13 @@ TOOLSETS = {
         ],
         "includes": []
     },
+    "eko": {
+        "description": "Eko group/topic management: create groups, create topics, query users",
+        "tools": [
+            "eko_create_group", "eko_create_topic", "eko_query_users",
+        ],
+        "includes": []
+    },
 
 
     # Scenario-specific toolsets

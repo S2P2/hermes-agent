@@ -1937,3 +1937,189 @@ class TestSendEkoMediaGroupRouting:
         # After remap to g1_t1, should route to group endpoint.
         adapter._client.push_group_file.assert_called_once()
         adapter._client.push_file.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 21. Eko management tools (Issue #17)
+# ---------------------------------------------------------------------------
+
+
+def _make_client_mock():
+    """Create a mock _EkoClient with async management methods."""
+    client = MagicMock()
+    client.create_group = AsyncMock(return_value={"_id": "grp_new", "type": "direct_chat"})
+    client.create_topic = AsyncMock(return_value={"_id": "top_new", "gid": "grp_1"})
+    client.query_users = AsyncMock(return_value=[
+        {"_id": "u1", "username": "alice", "email": "alice@ex.com"},
+    ])
+    return client
+
+
+def _patch_eko_client(client_mock):
+    """Patch _get_eko_client to return the given mock."""
+    return patch("plugins.platforms.eko.tools._get_eko_client", return_value=client_mock)
+
+
+class TestEkoCreateGroupTool:
+
+    @pytest.mark.asyncio
+    async def test_create_group_with_uids(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_uids": ["u1", "u2"]}))
+        assert result.get("_id") == "grp_new"
+        client.create_group.assert_called_once_with(["u1", "u2"], name="")
+
+    @pytest.mark.asyncio
+    async def test_create_group_with_usernames(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert result.get("_id") == "grp_new"
+        client.query_users.assert_called_once_with("alice")
+        client.create_group.assert_called_once_with(["u1"], name="")
+
+    @pytest.mark.asyncio
+    async def test_create_group_with_name(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({
+                "member_uids": ["u1"], "name": "Project X",
+            }))
+        assert result.get("_id") == "grp_new"
+        client.create_group.assert_called_once_with(["u1"], name="Project X")
+
+    @pytest.mark.asyncio
+    async def test_create_group_no_members_error(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({}))
+        assert "error" in result
+        assert "member_usernames or member_uids" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_group_user_not_found(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["nobody"]}))
+        assert "error" in result
+        assert "not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_group_not_connected(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        with _patch_eko_client(None):
+            result = json.loads(await _handle_create_group({"member_uids": ["u1"]}))
+        assert "error" in result
+        assert "not connected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_group_api_failure(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.create_group = AsyncMock(side_effect=RuntimeError("server error"))
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_uids": ["u1"]}))
+        assert "error" in result
+        assert "server error" in result["error"]
+
+
+class TestEkoCreateTopicTool:
+
+    @pytest.mark.asyncio
+    async def test_create_topic(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({
+                "group_id": "grp_1", "name": "General",
+            }))
+        assert result.get("_id") == "top_new"
+        client.create_topic.assert_called_once_with("grp_1", "General")
+
+    @pytest.mark.asyncio
+    async def test_create_topic_missing_group_id(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({"name": "X"}))
+        assert "error" in result
+        assert "group_id" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_topic_missing_name(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({"group_id": "g1"}))
+        assert "error" in result
+        assert "name" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_topic_not_connected(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        with _patch_eko_client(None):
+            result = json.loads(await _handle_create_topic({
+                "group_id": "g1", "name": "X",
+            }))
+        assert "error" in result
+        assert "not connected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_topic_api_failure(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        client.create_topic = AsyncMock(side_effect=RuntimeError("fail"))
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({
+                "group_id": "g1", "name": "X",
+            }))
+        assert "error" in result
+        assert "fail" in result["error"]
+
+
+class TestEkoQueryUsersTool:
+
+    @pytest.mark.asyncio
+    async def test_query_users(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_query_users({"username": "alice"}))
+        assert isinstance(result, list)
+        assert result[0]["username"] == "alice"
+        client.query_users.assert_called_once_with("alice")
+
+    @pytest.mark.asyncio
+    async def test_query_users_missing_username(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_query_users({}))
+        assert "error" in result
+        assert "username" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_query_users_not_connected(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        with _patch_eko_client(None):
+            result = json.loads(await _handle_query_users({"username": "a"}))
+        assert "error" in result
+        assert "not connected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_query_users_api_failure(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        client.query_users = AsyncMock(side_effect=RuntimeError("timeout"))
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_query_users({"username": "a"}))
+        assert "error" in result
+        assert "timeout" in result["error"]
+

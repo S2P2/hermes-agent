@@ -1499,6 +1499,8 @@ def interactive_setup() -> None:
 
 def register(ctx) -> None:
     """Plugin entry point - called by the Hermes plugin system at startup."""
+    # Import tools module to trigger registry.register() calls.
+    import plugins.platforms.eko.tools  # noqa: F401
     ctx.register_platform(
         name="eko",
         label="Eko",
