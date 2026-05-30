@@ -172,6 +172,11 @@ to `/bot/v1/direct/*`.
 
 ## Version History
 
+### v1.4.0
+
+- **Management API methods on `_EkoClient`.** Added `create_group(uids, name)`, `create_topic(gid, name)`, and `query_users(username)` for programmatic group/topic creation and user lookup (Issue #16).
+- 10 new tests (115 total, up from 105).
+
 ### v1.3.1
 
 - **Fixed document/file routing to topics.** Eko sets `groupType: "direct_chat"` even for
@@ -215,6 +220,18 @@ to `/bot/v1/direct/*`.
 - Cron/notification delivery via `EKO_HOME_CHANNEL`
 - Interactive setup wizard
 
+## Management API
+
+The `_EkoClient` exposes management methods for programmatic group/topic creation and user lookup. These are the building blocks for agent tools (Issue #17).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `create_group(uids, name)` | `POST /bot/v1/groups` | Create a group chat with member uids (multipart) |
+| `create_topic(gid, name)` | `POST /bot/v1/groups/{gid}/topics` | Create a topic in a group (JSON) |
+| `query_users(username)` | `GET /bot/v1/users?username=...` | Look up users by username |
+
+All methods follow the standard pattern: Bearer auth via `ensure_token()`, 401 → clear token → raise `_EkoAuthError`, other errors → `RuntimeError`.
+
 ## Roadmap
 
 ### High priority
@@ -227,7 +244,7 @@ to `/bot/v1/direct/*`.
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Group/topic management | Create groups, create topics, query users | Issue #16, #17 |
+| Agent tools for management | Expose create_group, create_topic, query_users as agent tools | Issue #17 (blocked by #16, which is done) |
 | Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
 
 ### Low priority

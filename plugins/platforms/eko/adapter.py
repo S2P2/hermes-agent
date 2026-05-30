@@ -471,6 +471,104 @@ class _EkoClient:
                         f"Eko group push file failed ({resp.status}): {body[:200]}"
                     )
 
+    # ------------------------------------------------------------------
+    # Management endpoints (group/topic creation, user lookup)
+    # ------------------------------------------------------------------
+
+    async def create_group(
+        self,
+        member_uids: list,
+        name: str = "",
+    ) -> dict:
+        """Create a group chat with the given member uids.
+
+        ``POST /bot/v1/groups`` via multipart/form-data.
+        Returns the created group object (includes ``_id`` and ``type``).
+        """
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/groups"
+        data = aiohttp.FormData()
+        for uid in member_uids:
+            data.add_field("uids", str(uid))
+        if name:
+            data.add_field("name", name)
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url, headers=self._auth_headers(token), data=data
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko create_group returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko create_group failed ({resp.status}): {body[:200]}"
+                    )
+                return await resp.json()
+
+    async def create_topic(self, gid: str, name: str) -> dict:
+        """Create a topic in an existing group.
+
+        ``POST /bot/v1/groups/{gid}/topics`` with JSON body.
+        Returns the created topic object (includes ``_id`` and ``gid``).
+        """
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/groups/{gid}/topics"
+        payload = {"name": name}
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(
+                url,
+                headers={**self._auth_headers(token), "Content-Type": "application/json"},
+                json=payload,
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko create_topic returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko create_topic failed ({resp.status}): {body[:200]}"
+                    )
+                return await resp.json()
+
+    async def query_users(self, username: str) -> list:
+        """Look up users by username.
+
+        ``GET /bot/v1/users?username=...``.
+        Returns the user list (each entry has ``_id``, ``username``, ``email``).
+        """
+        import aiohttp
+
+        token = await self.ensure_token()
+        url = f"{self._base_url}/bot/v1/users"
+        params = {"username": username}
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(
+                url, headers=self._auth_headers(token), params=params
+            ) as resp:
+                if resp.status == 401:
+                    self.clear_token()
+                    raise _EkoAuthError(
+                        "Eko query_users returned 401 Unauthorized"
+                    )
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Eko query_users failed ({resp.status}): {body[:200]}"
+                    )
+                return await resp.json()
+
 class EkoAdapter(BasePlatformAdapter):
     """Eko Messaging API gateway adapter."""
 
