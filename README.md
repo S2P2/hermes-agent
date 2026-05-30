@@ -4,6 +4,8 @@
 
 # Hermes Agent ☤
 
+> **Fork notice:** This is the [S2P2/hermes-agent](https://github.com/S2P2/hermes-agent) fork, maintained to add **[Eko](https://eko.io) messaging platform** support via [`plugins/platforms/eko/`](plugins/platforms/eko/). Upstream changes from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) are regularly merged in.
+
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
   <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
