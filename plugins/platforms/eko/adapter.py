@@ -1104,7 +1104,12 @@ async def _standalone_send(
     media_files: Optional[List[str]] = None,
     force_document: bool = False,
 ) -> Dict[str, Any]:
-    """Out-of-process push delivery for cron jobs running detached from the gateway."""
+    """Out-of-process push delivery for cron jobs running detached from the gateway.
+
+    Sends the text message first, then uploads any ``media_files`` as images
+    or documents (detected by extension).  ``force_document`` sends all files
+    as documents regardless of extension.
+    """
     extra = getattr(pconfig, "extra", {}) or {}
     base_url = os.getenv("EKO_BASE_URL") or extra.get("base_url", "")
     client_id = os.getenv("EKO_OAUTH_CLIENT_ID") or extra.get("oauth_client_id", "")
@@ -1113,11 +1118,40 @@ async def _standalone_send(
         return {"error": "Eko standalone send: missing config or chat_id"}
 
     client = _EkoClient(base_url, client_id, client_secret)
-    try:
-        await client.push_text(chat_id, message)
-        return {"success": True, "message_id": None}
-    except Exception as exc:
-        return {"error": str(exc)}
+
+    # Send text body.
+    if message:
+        try:
+            await client.push_text(chat_id, message)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    # Upload media attachments.
+    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    media_warnings: List[str] = []
+    for media_path in media_files or []:
+        try:
+            from pathlib import Path
+            p = Path(media_path)
+            file_bytes = p.read_bytes()
+            filename = p.name or "file"
+            ext = p.suffix.lower()
+        except OSError as exc:
+            media_warnings.append(f"Cannot read {media_path}: {exc}")
+            continue
+
+        try:
+            if not force_document and ext in _IMAGE_EXTS:
+                await client.push_picture(chat_id, file_bytes, filename)
+            else:
+                await client.push_file(chat_id, file_bytes, filename)
+        except Exception as exc:
+            media_warnings.append(f"Failed to send {filename}: {exc}")
+
+    result: Dict[str, Any] = {"success": True, "message_id": None}
+    if media_warnings:
+        result["warnings"] = media_warnings
+    return result
 
 
 def interactive_setup() -> None:
