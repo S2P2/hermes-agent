@@ -1121,14 +1121,14 @@ class EkoAdapter(BasePlatformAdapter):
         routing = self._get_routing(chat_id)
         is_group = self._is_group_chat(chat_id)
 
-        logger.debug(
+        logger.info(
             "[eko] send_document chat_id=%s uid=%s is_group=%s",
             chat_id, uid, routing, is_group,
         )
 
         async def _do_push_file():
             if is_group and routing:
-                logger.debug(
+                logger.info(
                     "[eko] push_group_file gid=%s tid=%s filename=%s size=%d",
                     routing["groupId"], routing["topicId"], filename, len(file_bytes),
                 )
@@ -1137,7 +1137,7 @@ class EkoAdapter(BasePlatformAdapter):
                     file_bytes, filename,
                 )
             else:
-                logger.debug(
+                logger.info(
                     "[eko] push_file uid=%s filename=%s size=%d",
                     uid, filename, len(file_bytes),
                 )
