@@ -769,6 +769,10 @@ class EkoAdapter(BasePlatformAdapter):
             "topicId": topic_id,
             "groupType": group_type,
         }
+        logger.info(
+            "[eko] routing stored chat_id=%s groupType=%s groupId=%s topicId=%s",
+            chat_id, group_type, group_id, topic_id,
+        )
 
         # Stash the reply token keyed by chat_id.
         if chat_id and reply_token:
@@ -921,7 +925,14 @@ class EkoAdapter(BasePlatformAdapter):
     def _is_group_chat(self, chat_id: str) -> bool:
         """Check if chat_id maps to a group/topic (not a DM)."""
         routing = self._get_routing(chat_id)
-        return bool(routing and routing.get("groupType") and routing["groupType"] != "direct_chat")
+        result = bool(routing and routing.get("groupType") and routing["groupType"] != "direct_chat")
+        logger.info(
+            "[eko] _is_group_chat chat_id=%s routing=%s result=%s",
+            chat_id,
+            {k: v for k, v in (routing or {}).items() if k != "uid"} if routing else None,
+            result,
+        )
+        return result
 
     async def _send_reply_or_push(
         self, chat_id: str, content: str
@@ -1123,7 +1134,7 @@ class EkoAdapter(BasePlatformAdapter):
 
         logger.info(
             "[eko] send_document chat_id=%s uid=%s is_group=%s",
-            chat_id, uid, routing, is_group,
+            chat_id, uid, is_group,
         )
 
         async def _do_push_file():
