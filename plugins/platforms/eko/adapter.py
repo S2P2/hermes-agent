@@ -76,15 +76,8 @@ def _truthy_env(name: str, default: bool = False) -> bool:
 
 def _guess_content_type(filename: str) -> str:
     """Guess MIME type from filename for multipart uploads."""
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    return {
-        "png": "image/png",
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "gif": "image/gif",
-        "webp": "image/webp",
-        "pdf": "application/pdf",
-    }.get(ext, "application/octet-stream")
+    import mimetypes
+    return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
 # ---------------------------------------------------------------------------
