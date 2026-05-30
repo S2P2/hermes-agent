@@ -919,9 +919,20 @@ class EkoAdapter(BasePlatformAdapter):
         return self._session_routing.get(chat_id) if hasattr(self, '_session_routing') else None
 
     def _is_group_chat(self, chat_id: str) -> bool:
-        """Check if chat_id maps to a group/topic (not a DM)."""
+        """Check if chat_id maps to a group/topic (not a bare DM uid).
+
+        Returns True when the routing metadata has both groupId and topicId,
+        meaning the conversation is within a group+topic context that requires
+        the ``/bot/v1/group/*`` endpoints — regardless of ``groupType``.
+        Eko sets ``groupType: "direct_chat"`` even for topics inside DM-type
+        groups, so we cannot rely on it to distinguish DM from topic routing.
+        """
         routing = self._get_routing(chat_id)
-        return bool(routing and routing.get("groupType") and routing["groupType"] != "direct_chat")
+        return bool(
+            routing
+            and routing.get("groupId")
+            and routing.get("topicId")
+        )
 
     async def _send_reply_or_push(
         self, chat_id: str, content: str
@@ -1269,6 +1280,11 @@ async def _standalone_send(
     Sends the text message first, then uploads any ``media_files`` as images
     or documents (detected by extension).  ``force_document`` sends all files
     as documents regardless of extension.
+
+    Supports group/topic routing: when the live gateway adapter is available,
+    resolves ``chat_id`` through its ``_session_routing`` dict to determine
+    DM vs group endpoints.  Falls back to DM endpoints when no routing
+    metadata is available.
     """
     extra = getattr(pconfig, "extra", {}) or {}
     base_url = os.getenv("EKO_BASE_URL") or extra.get("base_url", "")
@@ -1279,10 +1295,29 @@ async def _standalone_send(
 
     client = _EkoClient(base_url, client_id, client_secret)
 
+    # Resolve group/topic routing from the live adapter when available.
+    routing: Optional[Dict[str, str]] = None
+    is_group = False
+    try:
+        from gateway.run import _gateway_runner_ref
+        from gateway.config import Platform as _Platform
+        _runner = _gateway_runner_ref()
+        if _runner:
+            _adapter = _runner.adapters.get(_Platform("eko"))
+            if _adapter and hasattr(_adapter, "_get_routing"):
+                routing = _adapter._get_routing(chat_id)
+                if routing and routing.get("groupId") and routing.get("topicId"):
+                    is_group = True
+    except Exception:
+        pass
+
     # Send text body.
     if message:
         try:
-            await client.push_text(chat_id, message)
+            if is_group and routing:
+                await client.push_group_text(routing["groupId"], routing["topicId"], message)
+            else:
+                await client.push_text(chat_id, message)
         except Exception as exc:
             return {"error": str(exc)}
 
@@ -1302,9 +1337,15 @@ async def _standalone_send(
 
         try:
             if not force_document and ext in _IMAGE_EXTS:
-                await client.push_picture(chat_id, file_bytes, filename)
+                if is_group and routing:
+                    await client.push_group_picture(routing["groupId"], routing["topicId"], file_bytes, filename)
+                else:
+                    await client.push_picture(chat_id, file_bytes, filename)
             else:
-                await client.push_file(chat_id, file_bytes, filename)
+                if is_group and routing:
+                    await client.push_group_file(routing["groupId"], routing["topicId"], file_bytes, filename)
+                else:
+                    await client.push_file(chat_id, file_bytes, filename)
         except Exception as exc:
             media_warnings.append(f"Failed to send {filename}: {exc}")
 
