@@ -272,6 +272,12 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 ## Version History
 
+### v1.8.0
+
+- **Group/topic metadata from `get_chat_info`.** `get_chat_info()` now returns `type`, `group_id`, `topic_id`, `user_id`, and `group_type` by consulting `_session_routing`. Group chats use `groupId` as `chat_name`; DMs use sender `username`. `topicId` flows through as `thread_id` via `HERMES_SESSION_THREAD_ID` (Issue #30).
+- Fixed `chat_name` for group chats (was using sender username instead of groupId).
+- 22 new tests (202 total, up from 180).
+
 ### v1.7.0
 
 - **Require-mention filter for group chats.** `EKO_REQUIRE_MENTION=true` makes the bot only respond to group messages that contain a trigger word (default: `hermes`). DMs always respond. Customizable via `EKO_MENTION_TRIGGERS`. Case-insensitive, word-boundary matching, works anywhere in text (matches Eko's `@BotName` plain-text mention format).
@@ -346,9 +352,7 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 ### High priority
 
-| Feature | Description | Eko API |
-|---------|-------------|--------|
-| `get_chat_info` group metadata | Return group/topic metadata from `get_chat_info` | Issue #30 |
+None currently.
 
 ### Medium priority
 
