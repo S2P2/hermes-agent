@@ -1,6 +1,15 @@
 # Eko Messaging API Reference
 
-Local snapshot of the stable Eko Messaging API docs used by the Hermes Eko platform.
+Quick local summary of the stable Eko Messaging API docs used by the Hermes Eko platform.
+
+For full plain-markdown copies, see:
+
+- `raw_md/master.md`
+- `raw_md/messaging-api_getting-started.md`
+- `raw_md/messaging-api_webhook-api.md`
+- `raw_md/messaging-api_replying-message.md`
+- `raw_md/messaging-api_sending-a-message.md`
+- `raw_md/messaging-api_managing-chat.md`
 
 ## Scope
 
@@ -11,6 +20,16 @@ This reference covers the Messaging API pages that matter for the adapter:
 - Replying Message
 - Sending a Message
 - Managing Chat
+
+## Overview
+
+The Bot API supports three core functions:
+
+- user query
+- chat management
+- message creation
+
+It can be used for one-way notification bots and interactive bots.
 
 ## Authentication
 
@@ -82,6 +101,8 @@ Example `message` event:
 
 ## Replying message
 
+Reply endpoints use `multipart/form-data` except quick replies, which use JSON.
+
 ### Text reply
 
 `POST /bot/v1/message/text`
@@ -107,9 +128,17 @@ Form fields:
 JSON body:
 
 - `replyToken`
-- `message`
+- `message.data` — prompt text
+- `message.meta.quickreply.template` — e.g. `default`
+- `message.meta.quickreply.items[]` — quick-reply options with `type`, `value`, and `data.text`
 
 ## Sending a message
+
+Successful send endpoints return a simple status payload such as:
+
+```json
+{ "status": "success" }
+```
 
 ### Direct message
 
@@ -117,30 +146,22 @@ Text:
 
 `POST /bot/v1/direct/message`
 
-JSON body:
-
-- `uid`
-- `message.type = "text"`
-- `message.data`
+- Content-Type: `application/json`
+- Body: `uid`, `message.type = "text"`, `message.data`
 
 Picture:
 
 `POST /bot/v1/direct/picture`
 
-Multipart fields:
-
-- `uid`
-- `file`
-- optional `caption`
+- Content-Type: `multipart/form-data`
+- Fields: `uid`, `file`, optional `caption`
 
 File:
 
 `POST /bot/v1/direct/file`
 
-Multipart fields:
-
-- `uid`
-- `file`
+- Content-Type: `multipart/form-data`
+- Fields: `uid`, `file`
 
 ### Group/topic message
 
@@ -148,33 +169,22 @@ Text:
 
 `POST /bot/v1/group/message`
 
-JSON body:
-
-- `gid`
-- `tid`
-- `message.type = "text"`
-- `message.data`
+- Content-Type: `application/json`
+- Body: `gid`, `tid`, `message.type = "text"`, `message.data`
 
 Picture:
 
 `POST /bot/v1/group/picture`
 
-Multipart fields:
-
-- `gid`
-- `tid`
-- `file`
-- optional `caption`
+- Content-Type: `multipart/form-data`
+- Fields: `gid`, `tid`, `file`, optional `caption`
 
 File:
 
 `POST /bot/v1/group/file`
 
-Multipart fields:
-
-- `gid`
-- `tid`
-- `file`
+- Content-Type: `multipart/form-data`
+- Fields: `gid`, `tid`, `file`
 
 ## Managing chat
 
@@ -191,22 +201,30 @@ Returns a list of users with fields such as:
 - `lastname`
 - `deleted`
 
+### Group and topic IDs
+
+Eko group and topic IDs can be read from the Eko URL:
+
+- Open the group chat and read the group ID and general topic ID from the URL.
+- Click a specific topic to update the URL and read that topic ID.
+
 ### Create a group chat
 
 `POST /bot/v1/groups`
 
-Multipart fields:
+- Content-Type: `multipart/form-data`
+- Fields: `uids`, optional `name`, optional `file` group avatar
 
-- `uids` — repeated member IDs
-- optional `name`
+Response includes a `group` object with fields such as `_id`, `name`, `type`, `settings`, and `userCount`.
 
 ### Create a topic
 
 `POST /bot/v1/groups/{group_id}/topics`
 
-JSON body:
+- Content-Type: `application/json`
+- Body: `name`
 
-- `name`
+Response includes a `topic` object with fields such as `_id`, `name`, and `gid`.
 
 ## Source pages
 

@@ -1,6 +1,12 @@
 # Eko Workflow API Reference
 
-Local snapshot of the stable Eko Workflow API docs used by the Hermes Eko platform.
+Quick local summary of the stable Eko Workflow API docs used by the Hermes Eko platform.
+
+For full plain-markdown copies, see:
+
+- `raw_md/workflow-api_getting-started.md`
+- `raw_md/workflow-api_create-workflow.md`
+- `raw_md/workflow-api_webhooks-api.md`
 
 ## Scope
 
@@ -23,25 +29,58 @@ This reference covers workflow creation and workflow webhooks.
 
 - `POST /api/workflow/v1`
 - Auth: OAuth access token
+- Content-Type: `application/json`
 
 ### Common fields
 
+- `sender` — username of sender
+- `templateId` — workflow template ID
+- `priority` — High, Medium, Low
+- `dueDate` — `YYYY-MM-DD` or `YYYY-MM-DDTHH:mm`
+- `inputs` — object keyed by API tags
+
+### Input notes
+
+Workflow inputs can include text, text areas, users, numbers, choices, dates, and time fields. The raw docs show examples for:
+
+- `text`
+- `textArea`
+- `singleUser`
+- `multiUsers`
+- `number`
+- `yesNo`
+- `singleChoice`
+- `multiChoice`
+- `dateTime`
+- `time`
+
+### Response shape
+
+Successful creation returns fields such as:
+
+- `refId`
+- `title`
+- `createdAt`
+- `template.id`
+- `template.name`
 - `sender`
-- `templateId`
-- `inputs`
-
-### Notes
-
-- Priority values: High, Medium, Low
-- Due date format: `YYYY-MM-DD` or `YYYY-MM-DDTHH:mm`
-- Workflow inputs can include text, text areas, users, numbers, choices, dates, and time fields.
 
 ## Workflow webhooks
 
-- Configure webhook URL in the workflow settings in the Admin Panel.
+- Configure webhook URL in the Admin Panel path: Workflow → Settings → Webhooks.
+- Select content by defining API tags on workflow content.
 - Only content with an API tag is included in webhook payloads.
 - Webhook payloads are signed as JWT and sent under `data`.
 - The receiving app can decode and verify the JWT with the shared key.
+
+Decoded webhook data includes:
+
+- `meta.workflow._id`
+- `meta.workflow.status`
+- `meta.workflow.networkId`
+- `meta.workflow.createdAt`
+- `meta.workflow.lastActivity`
+- `data[]` entries keyed by API tag
 
 ## Source pages
 
