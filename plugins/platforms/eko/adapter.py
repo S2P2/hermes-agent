@@ -106,29 +106,6 @@ DEFAULT_WEBHOOK_PATH = "/eko/webhook"
 DEFAULT_REPLY_TOKEN_TTL = 50
 
 
-def _parse_explicit_routing(chat_id: str) -> Optional[Dict[str, str]]:
-    """Parse explicit group/topic routing from a chat_id string.
-
-    Accepts the format ``group:<gid>:topic:<tid>`` and returns
-    ``{"groupId": gid, "topicId": tid}`` when valid, or ``None``
-    when the chat_id does not use the explicit routing format.
-
-    Returns a sentinel dict with an ``"error"`` key when the format
-    is recognised but malformed (missing gid or tid values).
-    """
-    if not chat_id.startswith("group:"):
-        return None
-    parts = chat_id.split(":")
-    # Expected: ["group", <gid>, "topic", <tid>]
-    if len(parts) != 4 or parts[2] != "topic":
-        return {"error": f"Invalid explicit routing format: {chat_id!r}. "
-                        f"Expected group:<gid>:topic:<tid>"}
-    gid, tid = parts[1], parts[3]
-    if not gid or not tid:
-        return {"error": f"Invalid explicit routing format: {chat_id!r}. "
-                        f"group ID and topic ID must be non-empty"}
-    return {"groupId": gid, "topicId": tid}
-
 
 # Re-export client class for backward compat within this package.
 try:
