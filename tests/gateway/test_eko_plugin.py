@@ -1594,6 +1594,58 @@ class TestTopicRouting:
         assert call_args.source.chat_type == "dm"
 
     @pytest.mark.asyncio
+    async def test_group_chat_name_uses_group_id(self):
+        """Group chat_name should be the group ID, not the sender's username."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_grp",
+            "type": "message",
+            "source": {"userId": "user_abc", "username": "alice"},
+            "message": {
+                "id": "msg_grp",
+                "type": "text",
+                "groupId": "grp_1",
+                "groupType": "group",
+                "topicId": "topic_1",
+                "text": "hello group",
+            },
+            "sessionId": "grp_1_topic_1",
+        }
+
+        await adapter._handle_message_event(event)
+
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.source.chat_name == "grp_1"
+        assert call_args.source.chat_type == "group"
+
+    @pytest.mark.asyncio
+    async def test_dm_chat_name_uses_username(self):
+        """DM chat_name should be the sender's username, not a group ID."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_dm",
+            "type": "message",
+            "source": {"userId": "user_abc", "username": "alice"},
+            "message": {
+                "id": "msg_dm",
+                "type": "text",
+                "groupId": "grp_1",
+                "groupType": "direct_chat",
+                "topicId": "topic_dm",
+                "text": "hello DM",
+            },
+            "sessionId": "grp_1_topic_dm",
+        }
+
+        await adapter._handle_message_event(event)
+
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.source.chat_name == "alice"
+        assert call_args.source.chat_type == "dm"
+
+    @pytest.mark.asyncio
     async def test_topic_gets_separate_session(self):
         """A different topic in the same chat gets a different chat_id."""
         adapter = self._make_adapter()

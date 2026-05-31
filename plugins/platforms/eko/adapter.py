@@ -544,12 +544,17 @@ class EkoAdapter(BasePlatformAdapter):
         else:
             text = f"[unsupported message type: {msg_type}]"
 
+        # For group chats, use group_id as chat_name so the agent
+        # doesn't confuse the sender's username with the group name.
+        # For DMs, the sender's username is the correct chat name.
+        effective_chat_name = group_id if chat_type == "group" and group_id else username
+
         source_obj = self.build_source(
             chat_id=chat_id,
             chat_type=chat_type,
             user_id=uid,
             user_name=username,
-            chat_name=username,
+            chat_name=effective_chat_name,
         )
 
         event_obj = MessageEvent(
