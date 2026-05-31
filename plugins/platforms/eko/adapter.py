@@ -199,6 +199,28 @@ class EkoAdapter(BasePlatformAdapter):
             os.getenv("EKO_ALLOWED_USERS", "")
         ) | set(extra.get("allowed_users", []))
 
+        # Group/topic allowlist (#26)
+        self.allow_all_groups = _truthy_env(
+            "EKO_ALLOW_ALL_GROUPS", bool(extra.get("allow_all_groups", True))
+        )
+        self.allowed_groups = _csv_set(
+            os.getenv("EKO_ALLOWED_GROUPS", "")
+        ) | set(extra.get("allowed_groups", []))
+        # Topics use gid:tid format
+        self.allowed_topics = _csv_set(
+            os.getenv("EKO_ALLOWED_TOPICS", "")
+        ) | set(extra.get("allowed_topics", []))
+
+        # Require mention in groups (#22)
+        self.require_mention = _truthy_env(
+            "EKO_REQUIRE_MENTION", bool(extra.get("require_mention", True))
+        )
+        _triggers = (
+            os.getenv("EKO_MENTION_TRIGGERS", "")
+            or ",".join(extra.get("mention_triggers", []))
+        )
+        self.mention_triggers = [w.strip() for w in _triggers.split(",") if w.strip()]
+
         # Reply token TTL
         try:
             self.reply_token_ttl = float(
@@ -457,6 +479,33 @@ class EkoAdapter(BasePlatformAdapter):
         else:
             chat_type = "dm"
 
+        # -- Group-level filters (only for non-DM conversations) ---------
+        if chat_type == "group" and group_id:
+            # Extract raw text for mention matching (before media processing).
+            raw_text = msg.get("text", "") or "" if msg_type == "text" else ""
+
+            # #26: Group/topic allowlist gate.
+            if not self._allowed_group(group_id, topic_id):
+                logger.info(
+                    "Eko: rejecting group %s topic %s (not in allowlist)",
+                    group_id, topic_id,
+                )
+                return
+
+            # #22: Require mention filter.
+            # Slash commands (e.g. /new, /stop) bypass the mention filter —
+            # they are explicit bot directives, not casual group chat.
+            is_slash_command = raw_text.startswith("/")
+            if (
+                self.require_mention
+                and not is_slash_command
+                and not self._has_mention_trigger(raw_text)
+            ):
+                logger.debug(
+                    "Eko: ignoring group message (require_mention, no trigger)"
+                )
+                return
+
         # Store routing metadata so outbound send can resolve
         # the user uid for push fallback.
         self._session_routing[chat_id] = {
@@ -571,6 +620,51 @@ class EkoAdapter(BasePlatformAdapter):
         if not uid:
             return False
         return uid in self.allowed_users
+
+    def _allowed_group(self, group_id: str, topic_id: str = "") -> bool:
+        """Check if a group/topic is in the allowlist (#26).
+
+        allow_all_groups=true  → always allow.
+        Otherwise: group_id must be in allowed_groups, OR
+                   group_id:topic_id must be in allowed_topics.
+        """
+        if self.allow_all_groups:
+            return True
+        if group_id in self.allowed_groups:
+            return True
+        if topic_id and f"{group_id}:{topic_id}" in self.allowed_topics:
+            return True
+        return False
+
+    def _has_mention_trigger(self, text: str) -> bool:
+        """Check if text contains an @mention trigger (#22).
+
+        Eko sends @mentions as plain text (e.g. "@Hermes Agent").
+        Matching is case-sensitive (Eko autocompletes exact bot name).
+        Also matches @all (group-wide mention).
+        """
+        # @all always triggers (Eko group-wide mention).
+        if "@all" in text:
+            # Word boundary check: @all must not be part of a longer word
+            idx = text.find("@all")
+            while idx != -1:
+                end = idx + 4  # len("@all")
+                if end >= len(text) or not text[end].isalnum():
+                    return True
+                idx = text.find("@all", idx + 1)
+
+        triggers = self.mention_triggers or ["Hermes Agent"]
+        for trigger in triggers:
+            # Case-sensitive: look for @trigger in text.
+            needle = "@" + trigger
+            idx = text.find(needle)
+            while idx != -1:
+                end = idx + len(needle)
+                # Word boundary after: end of string or non-alnum char.
+                if end >= len(text) or not text[end].isalnum():
+                    return True
+                idx = text.find(needle, idx + 1)
+        return False
 
     # ------------------------------------------------------------------
     # Outbound send (text)

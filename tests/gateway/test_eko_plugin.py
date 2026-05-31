@@ -128,6 +128,393 @@ class TestAllowlist:
 # 3. Reply token stash
 # ---------------------------------------------------------------------------
 
+class TestRequireMention:
+    """Issue #22: require_mention filter for group chats."""
+
+    def _make_adapter(self, **overrides):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.require_mention = overrides.get("require_mention", False)
+        adapter.mention_triggers = overrides.get("mention_triggers", [])
+        adapter.allow_all_groups = overrides.get("allow_all_groups", True)
+        adapter.allowed_groups = overrides.get("allowed_groups", set())
+        adapter.allowed_topics = overrides.get("allowed_topics", set())
+        adapter._reply_tokens = {}
+        adapter._session_routing = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+        return adapter
+
+    def _group_text_event(self, text, group_id="g1", topic_id="t1"):
+        return {
+            "replyToken": "tok",
+            "type": "message",
+            "source": {"userId": "u1", "username": "alice"},
+            "message": {
+                "id": "msg1",
+                "type": "text",
+                "text": text,
+                "groupId": group_id,
+                "topicId": topic_id,
+                "groupType": "group",
+            },
+        }
+
+    def _dm_text_event(self, text):
+        return {
+            "replyToken": "tok",
+            "type": "message",
+            "source": {"userId": "u1", "username": "alice"},
+            "message": {
+                "id": "msg1",
+                "type": "text",
+                "text": text,
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_disabled_responds_to_all_group_messages(self):
+        """require_mention=false (default): all group messages pass through."""
+        adapter = self._make_adapter(require_mention=False)
+        await adapter._handle_message_event(self._group_text_event("hello"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_enabled_untriggered_group_message_ignored(self):
+        """require_mention=true: group message without @mention is silently dropped."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("hello world"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_at_mention_at_start_passes(self):
+        """require_mention=true: '@Hermes Agent ...' passes."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("@Hermes Agent what is 2+2?"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_at_mention_mid_text_passes(self):
+        """require_mention=true: 'hey @Hermes Agent help' passes."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("hey @Hermes Agent help"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_at_mention_alone_passes(self):
+        """require_mention=true: just '@Hermes Agent' passes."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("@Hermes Agent"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_bare_trigger_without_at_ignored(self):
+        """Bare 'hermes' without @ prefix is ignored."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("hermes help"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wrong_case_ignored(self):
+        """Case-sensitive: '@hermes agent' does NOT match trigger 'Hermes Agent'."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("@hermes agent help"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dm_always_passes_when_enabled(self):
+        """require_mention=true: DMs always pass regardless of mention."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._dm_text_event("hello"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_dm_always_passes_when_disabled(self):
+        """require_mention=false: DMs always pass (baseline)."""
+        adapter = self._make_adapter(require_mention=False)
+        await adapter._handle_message_event(self._dm_text_event("hello"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_at_all_always_triggers(self):
+        """@all (Eko group-wide mention) always triggers the bot."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("@all please check this"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_at_all_word_boundary(self):
+        """@all not at word boundary does NOT trigger (e.g. '@alliance')."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("@alliance meeting"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_triggers_defaults_to_hermes_agent(self):
+        """When mention_triggers is empty, default to 'Hermes Agent'."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=[])
+        await adapter._handle_message_event(self._group_text_event("@Hermes Agent ping"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_triggers_no_match_ignored(self):
+        """Empty triggers + no @Hermes Agent in text → ignored."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=[])
+        await adapter._handle_message_event(self._group_text_event("random chat"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_trigger(self):
+        """Custom trigger word with @ prefix."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Bot"])
+        await adapter._handle_message_event(self._group_text_event("@Bot status"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_trigger_embedded_in_longer_name_rejected(self):
+        """@HermesAgent (no space) does NOT match trigger 'Hermes Agent'."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("@HermesAgent stuff"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_slash_command_bypasses_mention_filter(self):
+        """Slash commands like /new, /stop bypass the mention filter."""
+        adapter = self._make_adapter(require_mention=True, mention_triggers=["Hermes Agent"])
+        await adapter._handle_message_event(self._group_text_event("/new"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_slash_command_not_bypassed_when_disabled(self):
+        """Slash commands always pass (require_mention off is irrelevant, baseline)."""
+        adapter = self._make_adapter(require_mention=False)
+        await adapter._handle_message_event(self._group_text_event("/new"))
+        adapter.handle_message.assert_called_once()
+
+
+class TestGroupAllowlist:
+    """Issue #26: group/topic allowlist controls."""
+
+    def _make_adapter(self, **overrides):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.allow_all_groups = overrides.get("allow_all_groups", True)
+        adapter.allowed_groups = overrides.get("allowed_groups", set())
+        adapter.allowed_topics = overrides.get("allowed_topics", set())
+        adapter.require_mention = overrides.get("require_mention", False)
+        adapter.mention_triggers = overrides.get("mention_triggers", [])
+        adapter._reply_tokens = {}
+        adapter._session_routing = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+        return adapter
+
+    def _group_event(self, group_id="g1", topic_id="t1", group_type="group"):
+        return {
+            "replyToken": "tok",
+            "type": "message",
+            "source": {"userId": "u1", "username": "alice"},
+            "message": {
+                "id": "msg1",
+                "type": "text",
+                "text": "hello",
+                "groupId": group_id,
+                "topicId": topic_id,
+                "groupType": group_type,
+            },
+        }
+
+    def _dm_event(self):
+        return {
+            "replyToken": "tok",
+            "type": "message",
+            "source": {"userId": "u1", "username": "alice"},
+            "message": {
+                "id": "msg1",
+                "type": "text",
+                "text": "hello",
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_allow_all_groups_permits_any_group(self):
+        """allow_all_groups=true (default): any group passes."""
+        adapter = self._make_adapter(allow_all_groups=True)
+        await adapter._handle_message_event(self._group_event(group_id="g_unknown"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_disallowed_group_rejected(self):
+        """allow_all_groups=false: group not in allowed_groups is rejected."""
+        adapter = self._make_adapter(
+            allow_all_groups=False, allowed_groups={"g1"}
+        )
+        await adapter._handle_message_event(self._group_event(group_id="g_unknown"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allowed_group_passes(self):
+        """allow_all_groups=false: group in allowed_groups passes."""
+        adapter = self._make_adapter(
+            allow_all_groups=False, allowed_groups={"g1"}
+        )
+        await adapter._handle_message_event(self._group_event(group_id="g1"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_allowed_topic_passes(self):
+        """Topic-level allowlist: gid:tid in allowed_topics passes."""
+        adapter = self._make_adapter(
+            allow_all_groups=False,
+            allowed_groups=set(),
+            allowed_topics={"g1:t1"},
+        )
+        await adapter._handle_message_event(self._group_event(group_id="g1", topic_id="t1"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_topic_in_wrong_group_rejected(self):
+        """Topic allowlist: correct tid but wrong gid is rejected."""
+        adapter = self._make_adapter(
+            allow_all_groups=False,
+            allowed_groups=set(),
+            allowed_topics={"g1:t1"},
+        )
+        await adapter._handle_message_event(self._group_event(group_id="g2", topic_id="t1"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_group_allowlist_allows_all_topics_in_group(self):
+        """Group in allowed_groups → all topics in that group pass."""
+        adapter = self._make_adapter(
+            allow_all_groups=False, allowed_groups={"g1"}
+        )
+        await adapter._handle_message_event(self._group_event(group_id="g1", topic_id="any_topic"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_dm_unaffected_by_group_allowlist(self):
+        """DMs are not subject to group allowlist filtering."""
+        adapter = self._make_adapter(allow_all_groups=False)
+        await adapter._handle_message_event(self._dm_event())
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_topic_allowlist_overrides_group_rejection(self):
+        """Topic in allowed_topics passes even if its group is NOT in allowed_groups."""
+        adapter = self._make_adapter(
+            allow_all_groups=False,
+            allowed_groups=set(),
+            allowed_topics={"g2:t5"},
+        )
+        await adapter._handle_message_event(self._group_event(group_id="g2", topic_id="t5"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_group_id_treated_as_dm(self):
+        """Event with no groupId is treated as DM and bypasses group allowlist."""
+        adapter = self._make_adapter(allow_all_groups=False)
+        event = {
+            "replyToken": "tok",
+            "type": "message",
+            "source": {"userId": "u1", "username": "alice"},
+            "message": {
+                "id": "msg1",
+                "type": "text",
+                "text": "hello",
+                "groupType": "",
+            },
+        }
+        await adapter._handle_message_event(event)
+        adapter.handle_message.assert_called_once()
+
+
+class TestFiltersCompose:
+    """Both require_mention (#22) and group allowlist (#26) must compose."""
+
+    def _make_adapter(self, **overrides):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.require_mention = overrides.get("require_mention", False)
+        adapter.mention_triggers = overrides.get("mention_triggers", [])
+        adapter.allow_all_groups = overrides.get("allow_all_groups", True)
+        adapter.allowed_groups = overrides.get("allowed_groups", set())
+        adapter.allowed_topics = overrides.get("allowed_topics", set())
+        adapter._reply_tokens = {}
+        adapter._session_routing = {}
+        adapter._bot_user_id = None
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+        return adapter
+
+    def _group_event(self, text="hello", group_id="g1", topic_id="t1"):
+        return {
+            "replyToken": "tok",
+            "type": "message",
+            "source": {"userId": "u1", "username": "alice"},
+            "message": {
+                "id": "msg1",
+                "type": "text",
+                "text": text,
+                "groupId": group_id,
+                "topicId": topic_id,
+                "groupType": "group",
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_allowed_group_and_mentioned_passes(self):
+        """Both filters pass: group allowed + @mention present."""
+        adapter = self._make_adapter(
+            require_mention=True,
+            mention_triggers=["Hermes Agent"],
+            allow_all_groups=False,
+            allowed_groups={"g1"},
+        )
+        await adapter._handle_message_event(self._group_event(text="@Hermes Agent help"))
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_allowed_group_but_not_mentioned_rejected(self):
+        """Group allowed but no @mention → rejected by mention filter."""
+        adapter = self._make_adapter(
+            require_mention=True,
+            mention_triggers=["Hermes Agent"],
+            allow_all_groups=False,
+            allowed_groups={"g1"},
+        )
+        await adapter._handle_message_event(self._group_event(text="random chat"))
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mentioned_but_disallowed_group_rejected(self):
+        """@mention present but group not in allowlist → rejected by group filter."""
+        adapter = self._make_adapter(
+            require_mention=True,
+            mention_triggers=["Hermes Agent"],
+            allow_all_groups=False,
+            allowed_groups={"g_allowed"},
+        )
+        await adapter._handle_message_event(
+            self._group_event(text="@Hermes Agent help", group_id="g_blocked")
+        )
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_both_filters_disabled_all_pass(self):
+        """Both filters off (defaults): all messages pass."""
+        adapter = self._make_adapter(
+            require_mention=False,
+            allow_all_groups=True,
+        )
+        await adapter._handle_message_event(
+            self._group_event(text="anything", group_id="any_group")
+        )
+        adapter.handle_message.assert_called_once()
+
+
 class TestReplyTokenStash:
 
     def test_no_token_returns_empty(self):
@@ -1169,6 +1556,11 @@ class TestTopicRouting:
         adapter.reply_token_ttl = 50
         adapter.handle_message = AsyncMock()
         adapter.platform = Platform("eko")
+        adapter.allow_all_groups = True
+        adapter.allowed_groups = set()
+        adapter.allowed_topics = set()
+        adapter.require_mention = False
+        adapter.mention_triggers = []
         return adapter
 
     @pytest.mark.asyncio
