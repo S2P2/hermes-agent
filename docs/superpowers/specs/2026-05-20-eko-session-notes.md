@@ -2,7 +2,7 @@
 
 ## Current State
 
-**Working:** v1.1.0 live at `S2P2/hermes-agent` — bidirectional text chat + image support with Eko.
+**Working:** v1.5.0 live at `S2P2/hermes-agent` — bidirectional text chat + image/file + group/topic + management tools.
 
 **Tested and confirmed working:**
 - Webhook receives messages from Eko
@@ -10,101 +10,87 @@
 - Reply token → push fallback
 - User allowlist (`EKO_ALLOWED_USERS`)
 - Home channel (`EKO_HOME_CHANNEL`)
-- Gateway restart notifications
 - Webhook signature verification (`X-Eko-Signature` HMAC-SHA256-Base64)
-- **Inbound image receiving** — download, cache, vision model interpretation ✅
+- Inbound image receiving — download, cache, vision model interpretation ✅
+- Outbound image/file sending — multipart upload (DM + group/topic) ✅
+- Cron media attachments ✅
+- Group/topic outbound routing (by `groupId`+`topicId` presence, NOT `groupType`) ✅
+- Document routing to topics ✅ (fixed Issue #20)
+- Management tools: `eko_create_group`, `eko_create_topic`, `eko_query_users` ✅ (Issues #16, #17)
 
-**Known issues:**
-- **Outbound image/file sending not working** — `send_image_file`/`send_image`/`send_document` are implemented and tested in unit tests, but fail in live testing. Needs investigation:
-  - Check gateway logs for error messages from `push_picture`/`push_file`
-  - Verify the multipart upload format matches what Eko expects
-  - Check if file size limits or content-type headers are causing rejections
-  - May need to test the exact curl equivalent against the real Eko API
-  - Platform hint updated but LLM may not be triggering the `MEDIA:` path correctly
-- **Cron media attachments** — `_standalone_send()` ignores `media_files` parameter (Issue #3)
-
-**Bug fixed during testing:**
-- Eko OAuth endpoint requires `application/x-www-form-urlencoded`, not JSON.
-  The original adapter sent `json=payload`, changed to `data=aiohttp.FormData()`.
+**Known issues / limitations:**
+- Inbound file: no webhook event from Eko (platform limitation)
+- Inbound sticker: `[sticker]` placeholder only (no download API)
+- No `require_mention` config for group chats yet (Issue #22)
+- No management actions config gate yet (Issue #23)
 
 ## Key Decisions
 
 - **Plugin form** (not built-in) — lives at `plugins/platforms/eko/`, zero core code changes
 - **Configurable base URL** — Eko uses customer-specific hostnames (e.g. `customer-h1.ekoapp.com`)
-- **Reply token TTL** — defaulted to 50s (conservative), needs tuning after testing with real Eko
-- **Webhook signature verification** — **Done (branch: `feat/eko-webhook-signature`)**. Header is `X-Eko-Signature` (not `x-amity-signature` — that's Amity Social Cloud, a different product). Algorithm: HMAC-SHA256 of raw body, Base64-encoded, keyed by the OAuth client secret. Live-confirmed 2026-05-21.
-- **No slow-LLM postback** — Eko has no template button API equivalent (quick reply exists but deferred)
-- **401 handling** — dedicated `_EkoAuthError` exception class, not string matching
-- **`_bot_user_id`** — can now be populated from `meta.botId` in webhook events (live-confirmed 2026-05-21)
+- **Reply token TTL** — defaulted to 50s (conservative)
+- **Webhook signature** — `X-Eko-Signature` HMAC-SHA256-Base64, key = OAuth client secret
+- **No auto-topic creation** — see ADR-0001. Agent creates topics via `eko_create_topic` when needed.
+- **3 separate management tools** — see ADR-0002. Each tool has focused schema. Not a single action-dispatch tool.
+- **`groupType` is unreliable for routing** — always route by `groupId` + `topicId` presence
+- **`_EkoClient` creates fresh `aiohttp.ClientSession` per request** — no connection pooling
 
 ## Repo Setup
 
 ```
 origin   → https://github.com/S2P2/hermes-agent.git (your fork)
 upstream → https://github.com/NousResearch/hermes-agent.git
-Default PR repo → S2P2/hermes-agent
 ```
 
-## Files Created
+## Files
 
 | File | Purpose |
 |------|---------|
-| `plugins/platforms/eko/plugin.yaml` | Plugin manifest with env var declarations |
-| `plugins/platforms/eko/__init__.py` | Entry point |
-| `plugins/platforms/eko/adapter.py` | Full adapter (732 lines) |
-| `plugins/platforms/eko/README.md` | Setup guide + roadmap |
-| `tests/gateway/test_eko_plugin.py` | Tests (339 lines) |
-| `docs/superpowers/specs/2026-05-20-eko-messaging-design.md` | Design spec |
-| `docs/superpowers/plans/2026-05-20-eko-messaging.md` | Implementation plan |
+| `plugins/platforms/eko/adapter.py` | Full adapter (~1600 lines) — _EkoClient + EkoAdapter |
+| `plugins/platforms/eko/tools.py` | Management agent tools (3 tools) |
+| `plugins/platforms/eko/README.md` | Setup guide + roadmap + version history |
+| `tests/gateway/test_eko_plugin.py` | Tests (131 tests) |
+| `docs/adr/0001-eko-no-auto-topic.md` | ADR: no auto-topic creation |
+| `docs/adr/0002-eko-separate-management-tools.md` | ADR: separate tools vs action-dispatch |
 
-## Next Steps (see README roadmap)
+## Eko API Endpoints
 
-1. ~~**Image/file receiving + sending**~~ **Inbound done; outbound needs debugging** — inbound pictures work (vision model interprets them). Outbound `send_image_file`/`send_document` fail in live testing — needs investigation (see Known Issues above).
-2. ~~**Group chat support**~~ **Done (PR #14)** — topic/session routing implemented. Each Eko topic gets its own Hermes session via `sessionId`. Group `chat_type` support added.
-3. ~~**Webhook signature verification**~~ **Done (merged to main)**
-4. Run `pytest tests/gateway/test_eko_plugin.py` to validate tests
-5. Tune reply token TTL
-6. **Populate `_bot_user_id`** from `meta.botId` — enables self-message filtering
-7. ~~**Use `sessionId`** for Hermes session grouping~~ **Done (PR #14)** — format: `{groupId}_{topicId}`
-8. **Cron media attachments** — `_standalone_send()` should send `media_files` via `push_picture`/`push_file` (Issue #3)
-9. **Group allowlist** — currently only user-level allowlist; need group-level gating for non-DM groups
+| Endpoint | Purpose | Status |
+|----------|---------|--------|
+| `POST /bot/v1/direct/message` | Send text to user (JSON) | ✅ |
+| `POST /bot/v1/direct/picture` | Send image to user (multipart) | ✅ |
+| `POST /bot/v1/direct/file` | Send file to user (multipart) | ✅ |
+| `POST /bot/v1/group/message` | Send text to group/topic (JSON) | ✅ |
+| `POST /bot/v1/group/picture` | Send image to group/topic (multipart) | ✅ |
+| `POST /bot/v1/group/file` | Send file to group/topic (multipart) | ✅ |
+| `POST /bot/v1/groups` | Create group chat | ✅ |
+| `POST /bot/v1/groups/{gid}/topics` | Create topic in a group | ✅ |
+| `GET /bot/v1/users?username=...` | Query users by username | ✅ |
+| `POST /bot/v1/message/text` | Reply via reply token (multipart) | ✅ |
+| `POST /bot/v1/message/picture` | Reply image via reply token (multipart) | ✅ |
+| `GET /file/view/{id}?size=large` | Download inbound image | ✅ |
 
 ## Eko API Quirks
 
 - OAuth token endpoint: **form-urlencoded**, not JSON
-- Webhook events have no event ID (we hash the full JSON for dedup)
+- `groupType` is unreliable — `"direct_chat"` even for topics in DMs. Route by `groupId`+`topicId` presence.
+- Webhook events have no event ID (hash full JSON for dedup)
 - Source can use `userId` or `uid` depending on event type
-- Reply endpoint uses multipart/form-data
-- Push endpoint uses JSON
-- **Webhook signature**: `X-Eko-Signature` header, HMAC-SHA256-Base64, key = OAuth client secret (live-confirmed)
-- **Webhook user-agent**: `axios/0.19.2` — useful for identifying Eko traffic in proxy logs
+- Reply endpoint uses multipart/form-data; push uses JSON
+- Webhook signature: `X-Eko-Signature`, HMAC-SHA256-Base64
+- Webhook user-agent: `axios/0.19.2`
 
-## Eko Media — Live Testing Results (2026-05-21)
+## Open Issues
 
-**Inbound image:** ✅ Working
-- `message.type == "picture"` in webhook event
-- Download: `GET {base}/file/view/{pictureId}?size=large` with Bearer auth
-- Cache via `cache_image_from_bytes`, vision model interprets correctly
+| # | Title | Priority |
+|---|-------|----------|
+| 22 | `eko.require_mention` config — bot only responds when @mentioned in groups | Medium |
+| 23 | `eko.management_actions` config gate — allowlist for management tools | Low |
 
-**Inbound file:** ❌ No webhook event sent by Eko
-**Inbound sticker:** Webhook received with `packageId`/`stickerId`, no download API — `[sticker]` placeholder
+## Pitfalls
 
-**Outbound image:** ❌ Not working in live test
-- Endpoints: `/bot/v1/direct/picture` (push), `/bot/v1/message/picture` (reply)
-- Multipart upload with `file`, `uid`, `caption` fields
-- Unit tests pass but live Eko rejects or silently drops
-- Needs: check gateway logs, test raw curl, verify multipart format
-
-**Outbound file:** ❌ Not tested yet (same issue expected)
-- Endpoint: `/bot/v1/direct/file`
-
-| Field | Path | Notes |
-|-------|------|-------|
-| `source.email` | event.source | Always present, may be empty |
-| `source.profile` | event.source | User profile fields (FullName, Division, Department, TH names) |
-| `meta` | event | Contains `botId`, `networkId`, `clientId`, `userId` (bot operator) |
-| `meta.deep_research` | event.meta | Boolean flag — purpose unknown, always `false` so far |
-| `message.groupId` | event.message | Chat/conversation ID — useful for group chat routing |
-| `message.groupType` | event.message | `"direct_chat"` for DMs, `"team"` for group chats |
-| `message.topicId` | event.message | Topic (thread) within the group |
-| `sessionId` | event | Composite `{groupId}_{topicId}` — **now used as Hermes chat_id** (PR #14) |
+- `runner.adapters` is `Dict[Platform, BasePlatformAdapter]` — use `Platform("eko")` not `"eko"` string
+- `send_message` MEDIA delivery has a hardcoded platform allowlist — new platforms must be added
+- Empty text chunks cause Eko 400 errors — filter before sending
+- `logger.info("format %s", args)` with mismatched arg count silently fails
+- `_last_resolved_tool_names` is a process-global in `model_tools.py`

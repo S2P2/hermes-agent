@@ -19,6 +19,7 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 - File sending (push to user or group/topic)
 - Cron media attachments (images and files via standalone sender)
 - Group/topic-aware outbound routing (auto-detects DM vs group)
+- Management tools: create groups, create topics, query users from agent chat
 
 ## Prerequisites
 
@@ -129,6 +130,58 @@ Open Eko, create a 1:1 chat with the bot, and send a message.
 | `EKO_REPLY_TOKEN_TTL` | No | `50` | Reply-token TTL in seconds |
 | `EKO_MESSAGE_MAX_CHARS` | No | `5000` | Max chars per outbound message (chunks longer text) |
 
+## Agent Tools
+
+Three management tools are registered when the Eko adapter is connected.
+Enable the `eko` toolset for your platform to make them available:
+
+```
+hermes tools
+```
+
+Or in `config.yaml`:
+
+```yaml
+tools:
+  eko:
+    enabled:
+      - eko
+```
+
+| Tool | Description |
+|------|-------------|
+| `eko_create_group` | Create a group chat. Accepts `member_usernames` (auto-resolved to IDs) or `member_uids`. Optional `name`. |
+| `eko_create_topic` | Create a topic in an existing group by `group_id` and `name`. |
+| `eko_query_users` | Look up users by `username`. Returns `_id`, `username`, `email`. |
+
+These tools are **async** and gated on the Eko adapter being connected in the gateway.
+They disappear from the tool list when the gateway isn't running.
+
+### Example usage in chat
+
+```
+User: look up alice on eko
+Agent: [calls eko_query_users(username="alice")]
+
+User: create a group with alice and bob called Project Alpha
+Agent: [calls eko_create_group(member_usernames=["alice", "bob"], name="Project Alpha")]
+
+User: create a topic called Weekly Sync in that group
+Agent: [calls eko_create_topic(group_id="grp_123", name="Weekly Sync")]
+```
+
+## Management API
+
+The `_EkoClient` exposes low-level management methods. The agent tools above wrap these.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `create_group(uids, name)` | `POST /bot/v1/groups` | Create a group chat with member uids (multipart) |
+| `create_topic(gid, name)` | `POST /bot/v1/groups/{gid}/topics` | Create a topic in a group (JSON) |
+| `query_users(username)` | `GET /bot/v1/users?username=...` | Look up users by username |
+
+All methods follow the standard pattern: Bearer auth via `ensure_token()`, 401 → clear token → raise `_EkoAuthError`, other errors → `RuntimeError`.
+
 ## Architecture
 
 ```
@@ -171,6 +224,16 @@ to `/bot/v1/direct/*`.
 | Group chat | `{groupId}_{topicId}` | `group` |
 
 ## Version History
+
+### v1.5.0
+
+- **Agent tools for group/topic management.** `eko_create_group`, `eko_create_topic`, `eko_query_users` registered as async Hermes tools (Issue #17). Gated on Eko adapter being connected. `eko_create_group` accepts usernames (auto-resolves via `eko_query_users`) or raw user IDs.
+- 16 new tool tests (131 total, up from 115).
+
+### v1.4.0
+
+- **Management API methods on `_EkoClient`.** Added `create_group(uids, name)`, `create_topic(gid, name)`, and `query_users(username)` for programmatic group/topic creation and user lookup (Issue #16).
+- 10 new tests (115 total, up from 105).
 
 ### v1.3.1
 
@@ -227,19 +290,27 @@ to `/bot/v1/direct/*`.
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Group/topic management | Create groups, create topics, query users | Issue #16, #17 |
+| `require_mention` config | Bot only responds when @mentioned in group chats (DMs always respond) | Issue #22 |
 | Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
 
 ### Low priority
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
+| Management actions config gate | `eko.management_actions` allowlist to control which tools are available | Issue #23 |
 | Connection pooling | Reuse `aiohttp.ClientSession` across requests | Current pattern creates one per request (matches LINE adapter) |
 | Typing indicator | Show agent-is-working feedback | Eko may not have a typing API — needs investigation |
 | Markdown formatting | Test if Eko renders any formatting, adjust `format_message()` | Currently passes text through as-is |
 
-### Maintenance
+## Design Decisions
 
-- [ ] Run test suite: `pytest tests/gateway/test_eko_plugin.py`
+See `docs/adr/` for architectural decision records:
+
+- **ADR-0001** — Eko does not auto-create topics on new sessions. Users create topics manually; each gets its own Hermes session via `sessionId`.
+- **ADR-0002** — Management tools are 3 separate tools (`eko_create_group`, `eko_create_topic`, `eko_query_users`), not a single action-dispatch tool. Separate tools give focused schemas and self-documenting names. Discord's single-tool pattern exists because it has 20+ actions.
+
+## Maintenance
+
+- [ ] Run test suite: `scripts/run_tests.sh tests/gateway/test_eko_plugin.py`
 - [ ] Tune reply token TTL (current default: 50s — verify against actual Eko TTL)
 - [ ] Test OAuth token TTL handling (refresh before expiry)

@@ -587,11 +587,13 @@ class TestFetchPicture:
 # ---------------------------------------------------------------------------
 
 
-def _mock_aiohttp_for_post(status: int) -> MagicMock:
+def _mock_aiohttp_for_post(status: int, json_body=None) -> MagicMock:
     """Build a mock aiohttp module that stubs ClientSession + POST."""
     mock_resp = MagicMock()
     mock_resp.status = status
     mock_resp.text = AsyncMock(return_value="error body")
+    if json_body is not None:
+        mock_resp.json = AsyncMock(return_value=json_body)
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__ = AsyncMock(return_value=None)
 
@@ -659,6 +661,151 @@ class TestEkoClientOutboundMedia:
 
         assert client._access_token is None
         assert client._token_expires_at == 0.0
+
+
+def _mock_aiohttp_for_get(status: int, json_body=None) -> MagicMock:
+    """Build a mock aiohttp module that stubs ClientSession + GET."""
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.text = AsyncMock(return_value="error body")
+    if json_body is not None:
+        mock_resp.json = AsyncMock(return_value=json_body)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=None)
+
+    mock_aiohttp = MagicMock()
+    mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
+    mock_aiohttp.ClientTimeout = MagicMock()
+    return mock_aiohttp
+
+
+class TestManagementMethods:
+    """Tests for _EkoClient.create_group, create_topic, query_users."""
+
+    @pytest.mark.asyncio
+    async def test_create_group_returns_dict(self):
+        group_resp = {"_id": "grp_1", "type": "direct_chat", "members": ["u1", "u2"]}
+        mock_aiohttp = _mock_aiohttp_for_post(200, json_body=group_resp)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            result = await client.create_group(["u1", "u2"], name="Test Group")
+
+        assert result == group_resp
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/groups")
+
+    @pytest.mark.asyncio
+    async def test_create_group_no_name(self):
+        group_resp = {"_id": "grp_2", "type": "direct_chat"}
+        mock_aiohttp = _mock_aiohttp_for_post(200, json_body=group_resp)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            result = await client.create_group(["u1"])
+
+        assert result == group_resp
+
+    @pytest.mark.asyncio
+    async def test_create_group_401_raises_auth_error(self):
+        mock_aiohttp = _mock_aiohttp_for_post(401)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(_EkoAuthError):
+                await client.create_group(["u1"])
+
+        assert client._access_token is None
+        assert client._token_expires_at == 0.0
+
+    @pytest.mark.asyncio
+    async def test_create_group_server_error_raises_runtime(self):
+        mock_aiohttp = _mock_aiohttp_for_post(500)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(RuntimeError, match="Eko create_group failed"):
+                await client.create_group(["u1"])
+
+    @pytest.mark.asyncio
+    async def test_create_topic_returns_dict(self):
+        topic_resp = {"_id": "top_1", "gid": "grp_1", "name": "General"}
+        mock_aiohttp = _mock_aiohttp_for_post(200, json_body=topic_resp)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            result = await client.create_topic("grp_1", "General")
+
+        assert result == topic_resp
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/groups/grp_1/topics")
+
+    @pytest.mark.asyncio
+    async def test_create_topic_401_raises_auth_error(self):
+        mock_aiohttp = _mock_aiohttp_for_post(401)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(_EkoAuthError):
+                await client.create_topic("grp_1", "Topic")
+
+        assert client._access_token is None
+
+    @pytest.mark.asyncio
+    async def test_create_topic_server_error_raises_runtime(self):
+        mock_aiohttp = _mock_aiohttp_for_post(500)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(RuntimeError, match="Eko create_topic failed"):
+                await client.create_topic("grp_1", "Topic")
+
+    @pytest.mark.asyncio
+    async def test_query_users_returns_list(self):
+        users_resp = [
+            {"_id": "u1", "username": "alice", "email": "alice@ex.com"},
+            {"_id": "u2", "username": "alice2", "email": "alice2@ex.com"},
+        ]
+        mock_aiohttp = _mock_aiohttp_for_get(200, json_body=users_resp)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            result = await client.query_users("alice")
+
+        assert result == users_resp
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.get.assert_called_once()
+        call_args = mock_session.get.call_args
+        assert call_args[0][0].endswith("/bot/v1/users")
+
+    @pytest.mark.asyncio
+    async def test_query_users_401_raises_auth_error(self):
+        mock_aiohttp = _mock_aiohttp_for_get(401)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(_EkoAuthError):
+                await client.query_users("bob")
+
+        assert client._access_token is None
+
+    @pytest.mark.asyncio
+    async def test_query_users_server_error_raises_runtime(self):
+        mock_aiohttp = _mock_aiohttp_for_get(500)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            with pytest.raises(RuntimeError, match="Eko query_users failed"):
+                await client.query_users("bob")
 
 
 # ---------------------------------------------------------------------------
@@ -1790,3 +1937,189 @@ class TestSendEkoMediaGroupRouting:
         # After remap to g1_t1, should route to group endpoint.
         adapter._client.push_group_file.assert_called_once()
         adapter._client.push_file.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 21. Eko management tools (Issue #17)
+# ---------------------------------------------------------------------------
+
+
+def _make_client_mock():
+    """Create a mock _EkoClient with async management methods."""
+    client = MagicMock()
+    client.create_group = AsyncMock(return_value={"_id": "grp_new", "type": "direct_chat"})
+    client.create_topic = AsyncMock(return_value={"_id": "top_new", "gid": "grp_1"})
+    client.query_users = AsyncMock(return_value=[
+        {"_id": "u1", "username": "alice", "email": "alice@ex.com"},
+    ])
+    return client
+
+
+def _patch_eko_client(client_mock):
+    """Patch _get_eko_client to return the given mock."""
+    return patch("plugins.platforms.eko.tools._get_eko_client", return_value=client_mock)
+
+
+class TestEkoCreateGroupTool:
+
+    @pytest.mark.asyncio
+    async def test_create_group_with_uids(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_uids": ["u1", "u2"]}))
+        assert result.get("_id") == "grp_new"
+        client.create_group.assert_called_once_with(["u1", "u2"], name="")
+
+    @pytest.mark.asyncio
+    async def test_create_group_with_usernames(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert result.get("_id") == "grp_new"
+        client.query_users.assert_called_once_with("alice")
+        client.create_group.assert_called_once_with(["u1"], name="")
+
+    @pytest.mark.asyncio
+    async def test_create_group_with_name(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({
+                "member_uids": ["u1"], "name": "Project X",
+            }))
+        assert result.get("_id") == "grp_new"
+        client.create_group.assert_called_once_with(["u1"], name="Project X")
+
+    @pytest.mark.asyncio
+    async def test_create_group_no_members_error(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({}))
+        assert "error" in result
+        assert "member_usernames or member_uids" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_group_user_not_found(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["nobody"]}))
+        assert "error" in result
+        assert "not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_group_not_connected(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        with _patch_eko_client(None):
+            result = json.loads(await _handle_create_group({"member_uids": ["u1"]}))
+        assert "error" in result
+        assert "not connected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_group_api_failure(self):
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.create_group = AsyncMock(side_effect=RuntimeError("server error"))
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_uids": ["u1"]}))
+        assert "error" in result
+        assert "server error" in result["error"]
+
+
+class TestEkoCreateTopicTool:
+
+    @pytest.mark.asyncio
+    async def test_create_topic(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({
+                "group_id": "grp_1", "name": "General",
+            }))
+        assert result.get("_id") == "top_new"
+        client.create_topic.assert_called_once_with("grp_1", "General")
+
+    @pytest.mark.asyncio
+    async def test_create_topic_missing_group_id(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({"name": "X"}))
+        assert "error" in result
+        assert "group_id" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_topic_missing_name(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({"group_id": "g1"}))
+        assert "error" in result
+        assert "name" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_topic_not_connected(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        with _patch_eko_client(None):
+            result = json.loads(await _handle_create_topic({
+                "group_id": "g1", "name": "X",
+            }))
+        assert "error" in result
+        assert "not connected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_topic_api_failure(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        client.create_topic = AsyncMock(side_effect=RuntimeError("fail"))
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_topic({
+                "group_id": "g1", "name": "X",
+            }))
+        assert "error" in result
+        assert "fail" in result["error"]
+
+
+class TestEkoQueryUsersTool:
+
+    @pytest.mark.asyncio
+    async def test_query_users(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_query_users({"username": "alice"}))
+        assert isinstance(result, list)
+        assert result[0]["username"] == "alice"
+        client.query_users.assert_called_once_with("alice")
+
+    @pytest.mark.asyncio
+    async def test_query_users_missing_username(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_query_users({}))
+        assert "error" in result
+        assert "username" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_query_users_not_connected(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        with _patch_eko_client(None):
+            result = json.loads(await _handle_query_users({"username": "a"}))
+        assert "error" in result
+        assert "not connected" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_query_users_api_failure(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        client.query_users = AsyncMock(side_effect=RuntimeError("timeout"))
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_query_users({"username": "a"}))
+        assert "error" in result
+        assert "timeout" in result["error"]
+
