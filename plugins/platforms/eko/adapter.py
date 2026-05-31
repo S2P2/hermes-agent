@@ -975,6 +975,19 @@ class EkoAdapter(BasePlatformAdapter):
         """No-op - Eko has no documented typing indicator API."""
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+        routing = self._get_routing(chat_id)
+        if routing and routing.get("groupId"):
+            group_id = routing.get("groupId", "")
+            topic_id = routing.get("topicId", "")
+            chat_type = "topic" if topic_id else "group"
+            return {
+                "name": chat_id,
+                "type": chat_type,
+                "group_id": group_id,
+                "topic_id": topic_id,
+                "user_id": routing.get("uid", ""),
+                "group_type": routing.get("groupType", ""),
+            }
         return {"name": chat_id or "", "type": "dm"}
 
     def format_message(self, content: str) -> str:
