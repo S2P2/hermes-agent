@@ -184,7 +184,7 @@ The `_EkoClient` exposes low-level management methods. The agent tools above wra
 | `create_topic(gid, name)` | `POST /bot/v1/groups/{gid}/topics` | Create a topic in a group (JSON) |
 | `query_users(username)` | `GET /bot/v1/users?username=...` | Look up users by username |
 
-All methods follow the standard pattern: Bearer auth via `ensure_token()`, 401 → clear token → raise `_EkoAuthError`, other errors → `RuntimeError`.
+All methods follow the standard pattern: Bearer auth via `ensure_token()`, 401 → clear token → auto-retry once with fresh token, persistent failures → `RuntimeError`.
 
 ## Architecture
 

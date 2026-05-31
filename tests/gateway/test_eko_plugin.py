@@ -34,7 +34,7 @@ _eko = load_plugin_adapter("eko")
 EkoAdapter = _eko.EkoAdapter
 _MessageDeduplicator = _eko._MessageDeduplicator
 _EkoClient = _eko._EkoClient
-_EkoAuthError = _eko._EkoAuthError
+# RuntimeError removed — client now raises RuntimeError
 check_requirements = _eko.check_requirements
 validate_config = _eko.validate_config
 is_connected = _eko.is_connected
@@ -156,21 +156,7 @@ class TestReplyTokenStash:
 
 
 # ---------------------------------------------------------------------------
-# 4. _EkoAuthError
-# ---------------------------------------------------------------------------
-
-class TestEkoAuthError:
-
-    def test_is_runtime_error(self):
-        assert issubclass(_EkoAuthError, RuntimeError)
-
-    def test_carries_message(self):
-        err = _EkoAuthError("test message")
-        assert str(err) == "test message"
-
-
-# ---------------------------------------------------------------------------
-# 5. Outbound send routing
+# 4. Outbound send routing
 # ---------------------------------------------------------------------------
 
 class TestSendRouting:
@@ -217,7 +203,7 @@ class TestSendRouting:
         adapter = self._make_routing_adapter(
             _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
             _client=MagicMock(
-                reply_text=AsyncMock(side_effect=_EkoAuthError("401")),
+                reply_text=AsyncMock(side_effect=RuntimeError("401")),
                 push_text=AsyncMock(),
             ),
         )
@@ -237,16 +223,16 @@ class TestSendRouting:
         adapter._client.push_text.assert_called_once_with("chat1", "hello")
 
     @pytest.mark.asyncio
-    async def test_push_auth_error_retries(self):
+    async def test_push_succeeds(self):
         adapter = self._make_routing_adapter(
             _client=MagicMock(
-                push_text=AsyncMock(side_effect=[_EkoAuthError("401"), None]),
+                push_text=AsyncMock(),
             ),
         )
 
         result = await adapter.send("chat1", "hello")
         assert result.success
-        assert adapter._client.push_text.call_count == 2
+        adapter._client.push_text.assert_called_once_with("chat1", "hello")
 
     @pytest.mark.asyncio
     async def test_push_failure_returns_retryable(self):
@@ -535,22 +521,37 @@ def _make_eko_client(
     return client
 
 
-def _mock_aiohttp_for_fetch(status: int, body: bytes = b"") -> MagicMock:
-    """Build a mock aiohttp module that stubs ClientSession + GET."""
+def _mock_aiohttp_for_fetch(status: int, body: bytes = b"", refresh_status: int = 200) -> MagicMock:
+    """Build a mock aiohttp module that stubs ClientSession + GET.
+
+    ``refresh_status`` configures the mock POST response used when
+    ``_refresh_token`` is called during 401 retry.
+    """
     mock_resp = MagicMock()
     mock_resp.status = status
     mock_resp.read = AsyncMock(return_value=body)
+    mock_resp.text = AsyncMock(return_value="error body")
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__ = AsyncMock(return_value=None)
 
+    # Mock response for POST (used by _refresh_token during retry)
+    mock_post_resp = MagicMock()
+    mock_post_resp.status = refresh_status
+    mock_post_resp.json = AsyncMock(return_value={"access_token": "tok_refreshed", "expires_in": 3600})
+    mock_post_resp.text = AsyncMock(return_value="")
+    mock_post_resp.__aenter__ = AsyncMock(return_value=mock_post_resp)
+    mock_post_resp.__aexit__ = AsyncMock(return_value=None)
+
     mock_session = MagicMock()
     mock_session.get = MagicMock(return_value=mock_resp)
+    mock_session.post = MagicMock(return_value=mock_post_resp)
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
 
     mock_aiohttp = MagicMock()
     mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
     mock_aiohttp.ClientTimeout = MagicMock()
+    mock_aiohttp.FormData = MagicMock()
     return mock_aiohttp
 
 
@@ -578,7 +579,7 @@ class TestFetchPicture:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(_EkoAuthError):
+            with pytest.raises(RuntimeError):
                 await client.fetch_picture("pic456")
 
         assert client._access_token is None
@@ -589,8 +590,12 @@ class TestFetchPicture:
 # ---------------------------------------------------------------------------
 
 
-def _mock_aiohttp_for_post(status: int, json_body=None) -> MagicMock:
-    """Build a mock aiohttp module that stubs ClientSession + POST."""
+def _mock_aiohttp_for_post(status: int, json_body=None, refresh_status: int = 200) -> MagicMock:
+    """Build a mock aiohttp module that stubs ClientSession + POST.
+
+    ``refresh_status`` configures the mock POST response used when
+    ``_refresh_token`` is called during 401 retry.
+    """
     mock_resp = MagicMock()
     mock_resp.status = status
     mock_resp.text = AsyncMock(return_value="error body")
@@ -608,6 +613,26 @@ def _mock_aiohttp_for_post(status: int, json_body=None) -> MagicMock:
     mock_aiohttp.ClientSession = MagicMock(return_value=mock_session)
     mock_aiohttp.ClientTimeout = MagicMock()
     mock_aiohttp.FormData = MagicMock()
+
+    # If status is 401, the retry path calls _refresh_token which
+    # does its own POST. Patch that through by returning a successful
+    # token response when the OAuth endpoint is hit.
+    if status == 401 and refresh_status == 200:
+        _orig_post = mock_session.post
+
+        def _smart_post(url, **kwargs):
+            if "/oauth/token" in str(url):
+                refresh_resp = MagicMock()
+                refresh_resp.status = 200
+                refresh_resp.json = AsyncMock(return_value={"access_token": "tok_refreshed", "expires_in": 3600})
+                refresh_resp.text = AsyncMock(return_value="")
+                refresh_resp.__aenter__ = AsyncMock(return_value=refresh_resp)
+                refresh_resp.__aexit__ = AsyncMock(return_value=None)
+                return refresh_resp
+            return _orig_post.return_value
+
+        mock_session.post = MagicMock(side_effect=_smart_post)
+
     return mock_aiohttp
 
 
@@ -658,7 +683,7 @@ class TestEkoClientOutboundMedia:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(_EkoAuthError):
+            with pytest.raises(RuntimeError):
                 await client.push_picture("user1", b"imgdata", "photo.png")
 
         assert client._access_token is None
@@ -666,7 +691,10 @@ class TestEkoClientOutboundMedia:
 
 
 def _mock_aiohttp_for_get(status: int, json_body=None) -> MagicMock:
-    """Build a mock aiohttp module that stubs ClientSession + GET."""
+    """Build a mock aiohttp module that stubs ClientSession + GET.
+
+    Also supports POST for ``_refresh_token`` during 401 retry.
+    """
     mock_resp = MagicMock()
     mock_resp.status = status
     mock_resp.text = AsyncMock(return_value="error body")
@@ -675,8 +703,17 @@ def _mock_aiohttp_for_get(status: int, json_body=None) -> MagicMock:
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__ = AsyncMock(return_value=None)
 
+    # Mock response for POST (used by _refresh_token during retry)
+    mock_post_resp = MagicMock()
+    mock_post_resp.status = 200
+    mock_post_resp.json = AsyncMock(return_value={"access_token": "tok_refreshed", "expires_in": 3600})
+    mock_post_resp.text = AsyncMock(return_value="")
+    mock_post_resp.__aenter__ = AsyncMock(return_value=mock_post_resp)
+    mock_post_resp.__aexit__ = AsyncMock(return_value=None)
+
     mock_session = MagicMock()
     mock_session.get = MagicMock(return_value=mock_resp)
+    mock_session.post = MagicMock(return_value=mock_post_resp)
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
     mock_session.__aexit__ = AsyncMock(return_value=None)
 
@@ -721,7 +758,7 @@ class TestManagementMethods:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(_EkoAuthError):
+            with pytest.raises(RuntimeError):
                 await client.create_group(["u1"])
 
         assert client._access_token is None
@@ -733,7 +770,7 @@ class TestManagementMethods:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(RuntimeError, match="Eko create_group failed"):
+            with pytest.raises(RuntimeError, match="Eko API 500.*POST /bot/v1/groups"):
                 await client.create_group(["u1"])
 
     @pytest.mark.asyncio
@@ -757,7 +794,7 @@ class TestManagementMethods:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(_EkoAuthError):
+            with pytest.raises(RuntimeError):
                 await client.create_topic("grp_1", "Topic")
 
         assert client._access_token is None
@@ -768,7 +805,7 @@ class TestManagementMethods:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(RuntimeError, match="Eko create_topic failed"):
+            with pytest.raises(RuntimeError, match="Eko API 500.*POST /bot/v1/groups/grp_1/topics"):
                 await client.create_topic("grp_1", "Topic")
 
     @pytest.mark.asyncio
@@ -795,7 +832,7 @@ class TestManagementMethods:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(_EkoAuthError):
+            with pytest.raises(RuntimeError):
                 await client.query_users("bob")
 
         assert client._access_token is None
@@ -806,7 +843,7 @@ class TestManagementMethods:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            with pytest.raises(RuntimeError, match="Eko query_users failed"):
+            with pytest.raises(RuntimeError, match="Eko API 500.*GET /bot/v1/users"):
                 await client.query_users("bob")
 
 
@@ -995,7 +1032,7 @@ class TestOutboundMedia:
         adapter = EkoAdapter.__new__(EkoAdapter)
         adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
         adapter._client = MagicMock()
-        adapter._client.reply_picture = AsyncMock(side_effect=_EkoAuthError("401"))
+        adapter._client.reply_picture = AsyncMock(side_effect=RuntimeError("401"))
         adapter._client.push_picture = AsyncMock()
 
         with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):

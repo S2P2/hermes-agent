@@ -100,10 +100,27 @@ def _parse_explicit_routing(chat_id: str) -> Optional[Dict[str, str]]:
     return {"groupId": gid, "topicId": tid}
 
 
-def _guess_content_type(filename: str) -> str:
-    """Guess MIME type from filename for multipart uploads."""
-    import mimetypes
-    return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+# Re-export client class for backward compat within this package.
+try:
+    from .client import _EkoClient  # noqa: F401
+except ImportError:
+    # Test loader imports adapter.py as a standalone module
+    # (no package context), so relative import fails.
+    import importlib.util as _ilu
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _client_path = _Path(__file__).with_name("client.py")
+    _client_spec = _ilu.spec_from_file_location(
+        "plugins.platforms.eko.client", _client_path
+    )
+    if _client_spec and _client_spec.loader:
+        _client_mod = _ilu.module_from_spec(_client_spec)
+        _sys.modules["plugins.platforms.eko.client"] = _client_mod
+        _client_spec.loader.exec_module(_client_mod)
+        _EkoClient = _client_mod._EkoClient
+    else:
+        raise ImportError(f"Cannot load _EkoClient from {_client_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -130,470 +147,7 @@ class _MessageDeduplicator:
         return False
 
 
-# ---------------------------------------------------------------------------
-# OAuth2 HTTP client
-# ---------------------------------------------------------------------------
 
-
-class _EkoAuthError(RuntimeError):
-    """Raised when the Eko API returns a 401 Unauthorized response."""
-
-class _EkoClient:
-    """Thin async wrapper around the Eko Messaging API with OAuth2 management.
-
-    Holds a cached access token + expiry. ``ensure_token()`` proactively
-    refreshes before expiry; on 401 the token is cleared and the caller
-    retries once.
-    """
-
-    def __init__(
-        self,
-        base_url: str,
-        client_id: str,
-        client_secret: str,
-        *,
-        timeout: float = 15.0,
-    ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._client_id = client_id
-        self._client_secret = client_secret
-        self._timeout = timeout
-        self._access_token: Optional[str] = None
-        self._token_expires_at: float = 0.0
-
-    async def ensure_token(self) -> str:
-        """Return a valid access token, refreshing if needed."""
-        if self._access_token and time.time() < self._token_expires_at:
-            return self._access_token
-        await self._refresh_token()
-        if not self._access_token:
-            raise RuntimeError("Failed to obtain Eko access token")
-        return self._access_token
-
-    def clear_token(self) -> None:
-        """Clear cached token — called after a 401 response."""
-        self._access_token = None
-        self._token_expires_at = 0.0
-
-    async def _refresh_token(self) -> None:
-        """Fetch a new access token via OAuth2 client-credentials."""
-        import aiohttp
-
-        url = f"{self._base_url}/oauth/token"
-        # Eko OAuth expects client_credentials grant.
-        payload = aiohttp.FormData()
-        payload.add_field("grant_type", "client_credentials")
-        payload.add_field("client_id", self._client_id)
-        payload.add_field("client_secret", self._client_secret)
-        payload.add_field("scope", "bot")
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(url, data=payload) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko OAuth token request failed ({resp.status}): {body[:200]}"
-                    )
-                data = await resp.json()
-                self._access_token = data.get("access_token", "")
-                # Proactive refresh: use expires_in if provided, else 3600 s.
-                expires_in = float(data.get("expires_in", 3600))
-                # Refresh 60 s before actual expiry.
-                self._token_expires_at = time.time() + max(expires_in - 60, 30)
-
-    def _auth_headers(self, token: str) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {token}",
-        }
-
-    async def reply_text(self, reply_token: str, message: str) -> None:
-        """Send a text reply using a reply token."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/message/text"
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            # Eko reply endpoint uses multipart/form-data.
-            data = aiohttp.FormData()
-            data.add_field("message", message)
-            data.add_field("replyToken", reply_token)
-            async with session.post(
-                url, headers=self._auth_headers(token), data=data
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError("Eko API returned 401 Unauthorized")
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko reply failed ({resp.status}): {body[:200]}"
-                    )
-
-    async def push_text(self, uid: str, message: str) -> None:
-        """Push a text message to a user by uid."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/direct/message"
-        payload = {
-            "uid": uid,
-            "message": {"type": "text", "data": message},
-        }
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url,
-                headers={**self._auth_headers(token), "Content-Type": "application/json"},
-                json=payload,
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError("Eko API returned 401 Unauthorized")
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko push failed ({resp.status}): {body[:200]}"
-                    )
-
-    async def fetch_picture(self, picture_id: str) -> bytes:
-        """Download an inbound picture from Eko by picture ID.
-
-        GETs ``/file/view/{picture_id}?size=large`` with Bearer auth and
-        returns the raw image bytes.
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/file/view/{picture_id}?size=large"
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.get(
-                url, headers=self._auth_headers(token)
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError("Eko API returned 401 Unauthorized")
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko fetch picture failed ({resp.status}): {body[:200]}"
-                    )
-                return await resp.read()
-
-    async def push_picture(
-        self,
-        uid: str,
-        file_bytes: bytes,
-        filename: str,
-        caption: str = "",
-    ) -> None:
-        """Push an image to a user by uid via multipart upload."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/direct/picture"
-        data = aiohttp.FormData()
-        data.add_field("uid", uid)
-        if caption:
-            data.add_field("caption", caption)
-        data.add_field(
-            "file",
-            file_bytes,
-            filename=filename,
-            content_type=_guess_content_type(filename),
-        )
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url, headers=self._auth_headers(token), data=data
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko push picture returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko push picture failed ({resp.status}): {body[:200]}"
-                    )
-
-    async def reply_picture(
-        self,
-        reply_token: str,
-        file_bytes: bytes,
-        filename: str,
-    ) -> None:
-        """Reply with an image using a reply token via multipart upload."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/message/picture"
-        data = aiohttp.FormData()
-        data.add_field("replyToken", reply_token)
-        data.add_field(
-            "file",
-            file_bytes,
-            filename=filename,
-            content_type=_guess_content_type(filename),
-        )
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url, headers=self._auth_headers(token), data=data
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko reply picture returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko reply picture failed ({resp.status}): {body[:200]}"
-                    )
-
-    async def push_file(
-        self,
-        uid: str,
-        file_bytes: bytes,
-        filename: str,
-    ) -> None:
-        """Push a file to a user by uid via multipart upload."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/direct/file"
-        data = aiohttp.FormData()
-        data.add_field("uid", uid)
-        data.add_field(
-            "file",
-            file_bytes,
-            filename=filename,
-            content_type=_guess_content_type(filename),
-        )
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url, headers=self._auth_headers(token), data=data
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko push file returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko push file failed ({resp.status}): {body[:200]}"
-                    )
-
-    # ------------------------------------------------------------------
-    # Group/topic endpoints
-    # ------------------------------------------------------------------
-
-    async def push_group_text(self, gid: str, tid: str, message: str) -> None:
-        """Push a text message to a group/topic."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/group/message"
-        payload = {
-            "gid": gid,
-            "tid": tid,
-            "message": {"type": "text", "data": message},
-        }
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url,
-                headers={**self._auth_headers(token), "Content-Type": "application/json"},
-                json=payload,
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError("Eko group push returned 401 Unauthorized")
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko group push failed ({resp.status}): {body[:200]}"
-                    )
-
-    async def push_group_picture(
-        self,
-        gid: str,
-        tid: str,
-        file_bytes: bytes,
-        filename: str,
-        caption: str = "",
-    ) -> None:
-        """Push an image to a group/topic via multipart upload."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/group/picture"
-        data = aiohttp.FormData()
-        data.add_field("gid", gid)
-        data.add_field("tid", tid)
-        if caption:
-            data.add_field("caption", caption)
-        data.add_field(
-            "file",
-            file_bytes,
-            filename=filename,
-            content_type=_guess_content_type(filename),
-        )
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url, headers=self._auth_headers(token), data=data
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko group push picture returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko group push picture failed ({resp.status}): {body[:200]}"
-                    )
-
-    async def push_group_file(
-        self,
-        gid: str,
-        tid: str,
-        file_bytes: bytes,
-        filename: str,
-    ) -> None:
-        """Push a file to a group/topic via multipart upload."""
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/group/file"
-        data = aiohttp.FormData()
-        data.add_field("gid", gid)
-        data.add_field("tid", tid)
-        data.add_field(
-            "file",
-            file_bytes,
-            filename=filename,
-            content_type=_guess_content_type(filename),
-        )
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url, headers=self._auth_headers(token), data=data
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko group push file returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko group push file failed ({resp.status}): {body[:200]}"
-                    )
-
-    # ------------------------------------------------------------------
-    # Management endpoints (group/topic creation, user lookup)
-    # ------------------------------------------------------------------
-
-    async def create_group(
-        self,
-        member_uids: list,
-        name: str = "",
-    ) -> dict:
-        """Create a group chat with the given member uids.
-
-        ``POST /bot/v1/groups`` via multipart/form-data.
-        Returns the created group object (includes ``_id`` and ``type``).
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/groups"
-        data = aiohttp.FormData()
-        for uid in member_uids:
-            data.add_field("uids", str(uid))
-        if name:
-            data.add_field("name", name)
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url, headers=self._auth_headers(token), data=data
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko create_group returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko create_group failed ({resp.status}): {body[:200]}"
-                    )
-                return await resp.json()
-
-    async def create_topic(self, gid: str, name: str) -> dict:
-        """Create a topic in an existing group.
-
-        ``POST /bot/v1/groups/{gid}/topics`` with JSON body.
-        Returns the created topic object (includes ``_id`` and ``gid``).
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/groups/{gid}/topics"
-        payload = {"name": name}
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.post(
-                url,
-                headers={**self._auth_headers(token), "Content-Type": "application/json"},
-                json=payload,
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko create_topic returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko create_topic failed ({resp.status}): {body[:200]}"
-                    )
-                return await resp.json()
-
-    async def query_users(self, username: str) -> list:
-        """Look up users by username.
-
-        ``GET /bot/v1/users?username=...``.
-        Returns the user list (each entry has ``_id``, ``username``, ``email``).
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/bot/v1/users"
-        params = {"username": username}
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.get(
-                url, headers=self._auth_headers(token), params=params
-            ) as resp:
-                if resp.status == 401:
-                    self.clear_token()
-                    raise _EkoAuthError(
-                        "Eko query_users returned 401 Unauthorized"
-                    )
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(
-                        f"Eko query_users failed ({resp.status}): {body[:200]}"
-                    )
-                return await resp.json()
 
 class EkoAdapter(BasePlatformAdapter):
     """Eko Messaging API gateway adapter."""
@@ -1095,18 +649,7 @@ class EkoAdapter(BasePlatformAdapter):
             try:
                 await self._client.reply_text(token, content)
                 return SendResult(success=True, message_id=token)
-            except _EkoAuthError:
-                # Token expired or invalid - retry with fresh auth + push.
-                try:
-                    if is_group and routing:
-                        await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
-                    else:
-                        await self._client.push_text(uid, content)
-                    return SendResult(success=True, message_id=None)
-                except Exception as exc2:
-                    logger.error("Eko: push after 401 failed: %s", exc2)
-                    return SendResult(success=False, error=str(exc2))
-            except RuntimeError as exc:
+            except Exception as exc:
                 logger.info(
                     "Eko: reply token rejected (%s); falling back to push", exc
                 )
@@ -1118,16 +661,6 @@ class EkoAdapter(BasePlatformAdapter):
             else:
                 await self._client.push_text(uid, content)
             return SendResult(success=True, message_id=None)
-        except _EkoAuthError:
-            # Retry once with fresh token.
-            try:
-                if is_group and routing:
-                    await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
-                else:
-                    await self._client.push_text(uid, content)
-                return SendResult(success=True, message_id=None)
-            except Exception as exc2:
-                return SendResult(success=False, error=str(exc2))
         except RuntimeError as exc:
             logger.error("Eko: push send failed: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
@@ -1152,12 +685,6 @@ class EkoAdapter(BasePlatformAdapter):
         try:
             await _do_push()
             return SendResult(success=True, message_id=None)
-        except _EkoAuthError:
-            try:
-                await _do_push()
-                return SendResult(success=True, message_id=None)
-            except Exception as exc2:
-                return SendResult(success=False, error=str(exc2))
         except Exception as exc:
             logger.error("Eko: push chunk failed: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
@@ -1219,24 +746,12 @@ class EkoAdapter(BasePlatformAdapter):
             try:
                 await self._client.reply_picture(token, file_bytes, filename)
                 return SendResult(success=True, message_id=token)
-            except _EkoAuthError:
-                try:
-                    await _do_push_picture()
-                    return SendResult(success=True, message_id=None)
-                except Exception as exc2:
-                    return SendResult(success=False, error=str(exc2))
-            except RuntimeError as exc:
+            except Exception as exc:
                 logger.info("Eko: reply picture rejected (%s); falling back to push", exc)
 
         try:
             await _do_push_picture()
             return SendResult(success=True, message_id=None)
-        except _EkoAuthError:
-            try:
-                await _do_push_picture()
-                return SendResult(success=True, message_id=None)
-            except Exception as exc2:
-                return SendResult(success=False, error=str(exc2))
         except RuntimeError as exc:
             return SendResult(success=False, error=str(exc), retryable=True)
         except Exception as exc:
@@ -1318,12 +833,6 @@ class EkoAdapter(BasePlatformAdapter):
         try:
             await _do_push_file()
             return SendResult(success=True, message_id=None)
-        except _EkoAuthError:
-            try:
-                await _do_push_file()
-                return SendResult(success=True, message_id=None)
-            except Exception as exc2:
-                return SendResult(success=False, error=str(exc2))
         except RuntimeError as exc:
             return SendResult(success=False, error=str(exc), retryable=True)
         except Exception as exc:
