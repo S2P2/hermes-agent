@@ -55,6 +55,8 @@ DEFAULT_WEBHOOK_PATH = "/eko/webhook"
 DEFAULT_REPLY_TOKEN_TTL = 50  # conservative below Eko's estimated ~60 s
 WEBHOOK_BODY_MAX_BYTES = 1_048_576  # 1 MiB
 DEFAULT_MESSAGE_MAX_CHARS = 5000  # conservative until Eko limit confirmed
+DEFAULT_MAX_UPLOAD_BYTES = 26_214_400  # 25 MiB
+DEFAULT_MAX_INBOUND_MEDIA_BYTES = 26_214_400  # 25 MiB
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +663,24 @@ class EkoAdapter(BasePlatformAdapter):
         except (TypeError, ValueError):
             self.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
 
+        # Upload size limit (outbound)
+        try:
+            self.max_upload_bytes = int(
+                os.getenv("EKO_MAX_UPLOAD_BYTES")
+                or extra.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
+            )
+        except (TypeError, ValueError):
+            self.max_upload_bytes = DEFAULT_MAX_UPLOAD_BYTES
+
+        # Inbound media size limit
+        try:
+            self.max_inbound_media_bytes = int(
+                os.getenv("EKO_MAX_INBOUND_MEDIA_BYTES")
+                or extra.get("max_inbound_media_bytes", DEFAULT_MAX_INBOUND_MEDIA_BYTES)
+            )
+        except (TypeError, ValueError):
+            self.max_inbound_media_bytes = DEFAULT_MAX_INBOUND_MEDIA_BYTES
+
         # Runtime state
         self._client: Optional[_EkoClient] = None
         self._app = None  # aiohttp.web.Application
@@ -954,6 +974,13 @@ class EkoAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("Eko: failed to download picture %s: %s", picture_id, exc)
             return None
+        max_inbound = getattr(self, 'max_inbound_media_bytes', DEFAULT_MAX_INBOUND_MEDIA_BYTES)
+        if max_inbound and len(data) > max_inbound:
+            logger.warning(
+                "Eko: inbound picture %s too large (%d bytes, limit %d)",
+                picture_id, len(data), max_inbound,
+            )
+            return None
         ext = self._ext_from_filename(msg.get("fileName", ""), default=".jpg")
         try:
             from gateway.platforms.base import cache_image_from_bytes
@@ -1155,7 +1182,19 @@ class EkoAdapter(BasePlatformAdapter):
         from pathlib import Path
 
         try:
-            file_bytes = Path(image_path).read_bytes()
+            fpath = Path(image_path)
+            # Check file size before reading into memory.
+            try:
+                file_size = fpath.stat().st_size
+                max_upload = getattr(self, 'max_upload_bytes', DEFAULT_MAX_UPLOAD_BYTES)
+                if max_upload and file_size > max_upload:
+                    return SendResult(
+                        success=False,
+                        error=f"Image file too large ({file_size} bytes, limit {max_upload})",
+                    )
+            except OSError:
+                pass  # stat failed; let read_bytes try
+            file_bytes = fpath.read_bytes()
         except OSError as exc:
             return SendResult(success=False, error=f"Cannot read image: {exc}")
 
@@ -1245,7 +1284,19 @@ class EkoAdapter(BasePlatformAdapter):
         from pathlib import Path
 
         try:
-            file_bytes = Path(file_path).read_bytes()
+            fpath = Path(file_path)
+            # Check file size before reading into memory.
+            try:
+                file_size = fpath.stat().st_size
+                max_upload = getattr(self, 'max_upload_bytes', DEFAULT_MAX_UPLOAD_BYTES)
+                if max_upload and file_size > max_upload:
+                    return SendResult(
+                        success=False,
+                        error=f"File too large ({file_size} bytes, limit {max_upload})",
+                    )
+            except OSError:
+                pass  # stat failed; let read_bytes try
+            file_bytes = fpath.read_bytes()
         except OSError as exc:
             return SendResult(success=False, error=f"Cannot read file: {exc}")
 
@@ -1455,10 +1506,26 @@ async def _standalone_send(
     # Upload media attachments.
     _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     media_warnings: List[str] = []
+
+    # Resolve upload size limit from env/config.
+    try:
+        max_upload = int(
+            os.getenv("EKO_MAX_UPLOAD_BYTES")
+            or extra.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
+        )
+    except (TypeError, ValueError):
+        max_upload = DEFAULT_MAX_UPLOAD_BYTES
+
     for media_path in media_files or []:
         try:
             from pathlib import Path
             p = Path(media_path)
+            file_size = p.stat().st_size
+            if max_upload and file_size > max_upload:
+                media_warnings.append(
+                    f"File too large: {p.name} ({file_size} bytes, limit {max_upload})"
+                )
+                continue
             file_bytes = p.read_bytes()
             filename = p.name or "file"
             ext = p.suffix.lower()

@@ -60,6 +60,8 @@ EKO_HOME_CHANNEL=your_eko_user_id
 # EKO_WEBHOOK_PATH=/eko/webhook
 # EKO_REPLY_TOKEN_TTL=50
 # EKO_ALLOW_ALL_USERS=false
+# EKO_MAX_UPLOAD_BYTES=26214400
+# EKO_MAX_INBOUND_MEDIA_BYTES=26214400
 ```
 
 Or configure via `~/.hermes/config.yaml`:
@@ -129,6 +131,8 @@ Open Eko, create a 1:1 chat with the bot, and send a message.
 | `EKO_HOME_CHANNEL` | No | (empty) | Default user ID for cron delivery |
 | `EKO_REPLY_TOKEN_TTL` | No | `50` | Reply-token TTL in seconds |
 | `EKO_MESSAGE_MAX_CHARS` | No | `5000` | Max chars per outbound message (chunks longer text) |
+| `EKO_MAX_UPLOAD_BYTES` | No | `26214400` | Max file size for outbound uploads (25 MiB). Oversized files are rejected before reading into memory. |
+| `EKO_MAX_INBOUND_MEDIA_BYTES` | No | `26214400` | Max size for inbound picture downloads (25 MiB). Oversized downloads are discarded. |
 
 ## Agent Tools
 
@@ -217,6 +221,10 @@ DM-type groups, so any conversation with both `groupId` and `topicId` uses the
 `/bot/v1/group/*` endpoints. Bare uid routing (no groupId/topicId) falls back
 to `/bot/v1/direct/*`.
 
+**Standalone routing** (cron without gateway): use the explicit format
+`group:<gid>:topic:<tid>` as the `chat_id` in `EKO_HOME_CHANNEL` or cron job
+targets. Without the explicit format, standalone delivery falls back to DM push.
+
 | Eko source | chat_id | chat_type |
 |------------|---------|----------|
 | DM (main topic) | `{groupId}_{topicId}` | `dm` |
@@ -224,6 +232,12 @@ to `/bot/v1/direct/*`.
 | Group chat | `{groupId}_{topicId}` | `group` |
 
 ## Version History
+
+### v1.6.0
+
+- **Standalone group/topic routing.** Cron/scheduled jobs can target Eko groups/topics without a running gateway using the explicit routing format `group:<gid>:topic:<tid>` in the chat_id. Malformed routing returns a clear error instead of silently falling back to DM (Issue #25).
+- **Upload and inbound media size limits.** Configurable via `EKO_MAX_UPLOAD_BYTES` and `EKO_MAX_INBOUND_MEDIA_BYTES` (default 25 MiB each). Outbound files are checked via `stat()` before reading into memory; oversized inbound pictures are discarded (Issue #28).
+- 16 new tests (147 total, up from 131).
 
 ### v1.5.0
 

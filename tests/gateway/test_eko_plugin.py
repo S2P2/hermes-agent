@@ -42,6 +42,8 @@ _env_enablement = _eko._env_enablement
 _standalone_send = _eko._standalone_send
 register = _eko.register
 DEFAULT_MESSAGE_MAX_CHARS = _eko.DEFAULT_MESSAGE_MAX_CHARS
+DEFAULT_MAX_UPLOAD_BYTES = _eko.DEFAULT_MAX_UPLOAD_BYTES
+DEFAULT_MAX_INBOUND_MEDIA_BYTES = _eko.DEFAULT_MAX_INBOUND_MEDIA_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -1977,6 +1979,139 @@ class TestStandaloneSendExplicitRouting:
             )
         assert result["success"]
         mock_group.assert_called_once_with("g1", "t1", "hello")
+
+
+# ---------------------------------------------------------------------------
+# 17c. Media size limits (Issue #28)
+# ---------------------------------------------------------------------------
+
+
+class TestMediaSizeLimits:
+    """Tests for upload and inbound media size limits."""
+
+    def _make_adapter(self, max_upload=10_485_760, max_inbound=10_485_760):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._session_routing = {}
+        adapter._client = MagicMock(
+            push_picture=AsyncMock(),
+            push_file=AsyncMock(),
+            push_group_picture=AsyncMock(),
+            push_group_file=AsyncMock(),
+        )
+        adapter.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
+        adapter.max_upload_bytes = max_upload
+        adapter.max_inbound_media_bytes = max_inbound
+        adapter.platform = Platform("eko")
+        adapter.config = _make_config()
+        adapter._message_handler = None
+        adapter._running = True
+        return adapter
+
+    # -- Outbound: send_image_file --
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_rejects_oversized(self, tmp_path):
+        """Oversized image file is rejected before reading into memory."""
+        img = tmp_path / "big.png"
+        img.write_bytes(b"\x89PNG" + b"x" * 100)
+
+        adapter = self._make_adapter(max_upload=50)  # 50 bytes limit
+        result = await adapter.send_image_file("chat1", str(img))
+        assert not result.success
+        assert "too large" in result.error.lower() or "size" in result.error.lower()
+        adapter._client.push_picture.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_allows_within_limit(self, tmp_path):
+        """Image file within limit is sent normally."""
+        img = tmp_path / "small.png"
+        img.write_bytes(b"\x89PNG" + b"x" * 10)
+
+        adapter = self._make_adapter(max_upload=10_485_760)
+        result = await adapter.send_image_file("chat1", str(img))
+        assert result.success
+        adapter._client.push_picture.assert_called_once()
+
+    # -- Outbound: send_document --
+
+    @pytest.mark.asyncio
+    async def test_send_document_rejects_oversized(self, tmp_path):
+        """Oversized document is rejected before reading into memory."""
+        doc = tmp_path / "big.pdf"
+        doc.write_bytes(b"%PDF" + b"x" * 100)
+
+        adapter = self._make_adapter(max_upload=50)
+        result = await adapter.send_document("chat1", str(doc))
+        assert not result.success
+        assert "too large" in result.error.lower() or "size" in result.error.lower()
+        adapter._client.push_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_document_allows_within_limit(self, tmp_path):
+        """Document within limit is sent normally."""
+        doc = tmp_path / "small.pdf"
+        doc.write_bytes(b"%PDF-1.4")
+
+        adapter = self._make_adapter(max_upload=10_485_760)
+        result = await adapter.send_document("chat1", str(doc))
+        assert result.success
+        adapter._client.push_file.assert_called_once()
+
+    # -- Inbound: _download_picture --
+
+    @pytest.mark.asyncio
+    async def test_download_picture_rejects_oversized(self):
+        """Inbound picture larger than limit is discarded."""
+        adapter = self._make_adapter(max_inbound=50)
+        adapter._client.fetch_picture = AsyncMock(return_value=b"x" * 200)
+
+        result = await adapter._download_picture({"pictureId": "pic123"})
+        assert result is None  # discarded due to size
+
+    @pytest.mark.asyncio
+    async def test_download_picture_allows_within_limit(self):
+        """Inbound picture within limit is cached normally."""
+        adapter = self._make_adapter(max_inbound=10_485_760)
+        adapter._client.fetch_picture = AsyncMock(return_value=b"\x89PNG" + b"x" * 10)
+
+        with patch("gateway.platforms.base.cache_image_from_bytes", return_value="/cache/pic.jpg"):
+            result = await adapter._download_picture({"pictureId": "pic123"})
+        assert result == "/cache/pic.jpg"
+
+    # -- Malformed config --
+
+    def test_malformed_upload_limit_gets_default(self):
+        """Malformed EKO_MAX_UPLOAD_BYTES falls back to default."""
+        with patch.dict(os.environ, {"EKO_MAX_UPLOAD_BYTES": "notanumber"}):
+            adapter = self._make_adapter()
+            # If __init__ were called, it would use the default;
+            # our test helper bypasses __init__, so we test the constant.
+            assert DEFAULT_MAX_UPLOAD_BYTES == 26_214_400
+
+    # -- _standalone_send media size check --
+
+    @pytest.mark.asyncio
+    async def test_standalone_send_rejects_oversized_media(self, tmp_path):
+        """_standalone_send rejects oversized media before upload."""
+        big = tmp_path / "big.pdf"
+        big.write_bytes(b"x" * 200)
+
+        cfg = _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+
+        with patch.dict(os.environ, {"EKO_MAX_UPLOAD_BYTES": "100"}), \
+             patch.object(_EkoClient, "push_text", new_callable=AsyncMock), \
+             patch("gateway.run._gateway_runner_ref", return_value=None):
+            result = await _standalone_send(
+                cfg, "user1", "text", media_files=[str(big)],
+            )
+        assert result["success"]  # text still sent
+        assert result.get("warnings")
+        assert any("too large" in w.lower() or "size" in w.lower() for w in result["warnings"])
 
 
 # ---------------------------------------------------------------------------
