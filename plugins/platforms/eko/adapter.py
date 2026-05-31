@@ -56,6 +56,26 @@ except ImportError:
     else:
         raise ImportError(f"Cannot load EkoConfig from {_cfg_path}")
 
+# Load OutboundSender — same fallback pattern.
+try:
+    from .outbound import OutboundSender  # noqa: F401
+except ImportError:
+    import importlib.util as _ilu_ob
+    import sys as _sys_ob
+    from pathlib import Path as _Path_ob
+
+    _ob_path = _Path_ob(__file__).with_name("outbound.py")
+    _ob_spec = _ilu_ob.spec_from_file_location(
+        "plugins.platforms.eko.outbound", _ob_path
+    )
+    if _ob_spec and _ob_spec.loader:
+        _ob_mod = _ilu_ob.module_from_spec(_ob_spec)
+        _sys_ob.modules["plugins.platforms.eko.outbound"] = _ob_mod
+        _ob_spec.loader.exec_module(_ob_mod)
+        OutboundSender = _ob_mod.OutboundSender
+    else:
+        raise ImportError(f"Cannot load OutboundSender from {_ob_path}")
+
 logger = logging.getLogger(__name__)
 
 from gateway.platforms.base import (
@@ -85,29 +105,6 @@ DEFAULT_WEBHOOK_PORT = 8647
 DEFAULT_WEBHOOK_PATH = "/eko/webhook"
 DEFAULT_REPLY_TOKEN_TTL = 50
 
-
-def _parse_explicit_routing(chat_id: str) -> Optional[Dict[str, str]]:
-    """Parse explicit group/topic routing from a chat_id string.
-
-    Accepts the format ``group:<gid>:topic:<tid>`` and returns
-    ``{"groupId": gid, "topicId": tid}`` when valid, or ``None``
-    when the chat_id does not use the explicit routing format.
-
-    Returns a sentinel dict with an ``"error"`` key when the format
-    is recognised but malformed (missing gid or tid values).
-    """
-    if not chat_id.startswith("group:"):
-        return None
-    parts = chat_id.split(":")
-    # Expected: ["group", <gid>, "topic", <tid>]
-    if len(parts) != 4 or parts[2] != "topic":
-        return {"error": f"Invalid explicit routing format: {chat_id!r}. "
-                        f"Expected group:<gid>:topic:<tid>"}
-    gid, tid = parts[1], parts[3]
-    if not gid or not tid:
-        return {"error": f"Invalid explicit routing format: {chat_id!r}. "
-                        f"group ID and topic ID must be non-empty"}
-    return {"groupId": gid, "topicId": tid}
 
 
 # Re-export client class for backward compat within this package.
@@ -183,6 +180,61 @@ class EkoAdapter(BasePlatformAdapter):
         # a bot identity API.
         self._bot_user_id: Optional[str] = None
 
+        # Outbound sender — owns route resolution, reply tokens, endpoint selection
+        self._sender = OutboundSender(
+            config=self._eko_config,
+            client=None,  # set in connect() after client is created
+            session_routing=self._session_routing,
+            reply_tokens=self._reply_tokens,
+        )
+
+    def _get_sender(self) -> OutboundSender:
+        """Lazily create OutboundSender (test helpers use __new__)."""
+        sender = self.__dict__.get("_sender")
+        if sender is not None:
+            return sender
+        # Build from whatever attributes are available (test helpers
+        # use __new__ + direct attr assignment).
+        from plugins.platforms.eko.config import EkoConfig as _EC
+        base_cfg = self.__dict__.get("_eko_config") or _EC()
+        # Test helpers may have set config attrs directly on __dict__;
+        # layer them on top of the base config.
+        overrides = {}
+        for key in (
+            "max_upload_bytes", "max_inbound_media_bytes",
+            "message_max_chars", "reply_token_ttl",
+        ):
+            val = self.__dict__.get(key)
+            if val is not None:
+                overrides[key] = val
+        cfg = _EC(
+            base_url=base_cfg.base_url,
+            oauth_client_id=base_cfg.oauth_client_id,
+            oauth_client_secret=base_cfg.oauth_client_secret,
+            webhook_host=base_cfg.webhook_host,
+            webhook_port=base_cfg.webhook_port,
+            webhook_path=base_cfg.webhook_path,
+            webhook_secret=base_cfg.webhook_secret,
+            require_signature=base_cfg.require_signature,
+            message_max_chars=overrides.get("message_max_chars", base_cfg.message_max_chars),
+            max_upload_bytes=overrides.get("max_upload_bytes", base_cfg.max_upload_bytes),
+            max_inbound_media_bytes=overrides.get("max_inbound_media_bytes", base_cfg.max_inbound_media_bytes),
+            reply_token_ttl=overrides.get("reply_token_ttl", base_cfg.reply_token_ttl),
+            allowed_users=base_cfg.allowed_users,
+            allowed_groups=base_cfg.allowed_groups,
+            allowed_topics=base_cfg.allowed_topics,
+            allow_all_users=base_cfg.allow_all_users,
+            allow_all_groups=base_cfg.allow_all_groups,
+            require_mention=base_cfg.require_mention,
+            mention_triggers=base_cfg.mention_triggers,
+        ) if overrides else base_cfg
+        client = self.__dict__.get("_client")
+        sr = self.__dict__.get("_session_routing") or {}
+        rt = self.__dict__.get("_reply_tokens") or {}
+        sender = OutboundSender(config=cfg, client=client, session_routing=sr, reply_tokens=rt)
+        self._sender = sender
+        return sender
+
     # ------------------------------------------------------------------
     # Config delegation — reads fall through to _eko_config, writes
     # land on self.__dict__ (backward compat for test helpers that
@@ -238,6 +290,7 @@ class EkoAdapter(BasePlatformAdapter):
             client_id=self.oauth_client_id,
             client_secret=self.oauth_client_secret,
         )
+        self._get_sender()._client = self._client
 
         # Verify OAuth credentials work before starting the webhook server.
         try:
@@ -638,13 +691,15 @@ class EkoAdapter(BasePlatformAdapter):
             return SendResult(success=True)
 
         last_result = SendResult(success=True)
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                # First chunk: try reply token, fall back to push.
-                last_result = await self._send_reply_or_push(chat_id, chunk)
-            else:
-                # Subsequent chunks: push only (reply token is single-use).
-                last_result = await self._send_push_only(chat_id, chunk)
+        for chunk in chunks:
+            try:
+                last_result = await self._get_sender().send_text(chat_id, chunk)
+            except RuntimeError as exc:
+                logger.error("Eko: send failed: %s", exc)
+                return SendResult(success=False, error=str(exc), retryable=True)
+            except Exception as exc:
+                logger.error("Eko: send failed: %s", exc)
+                return SendResult(success=False, error=str(exc), retryable=True)
             if not last_result.success:
                 return last_result
         return last_result
@@ -679,58 +734,6 @@ class EkoAdapter(BasePlatformAdapter):
             and routing.get("topicId")
         )
 
-    async def _send_reply_or_push(
-        self, chat_id: str, content: str
-    ) -> SendResult:
-        """Send content using reply token first, push as fallback."""
-        uid = self._resolve_uid(chat_id)
-        routing = self._get_routing(chat_id)
-        is_group = self._is_group_chat(chat_id)
-        token, used_reply = self._consume_reply_token(chat_id)
-        if used_reply:
-            try:
-                await self._client.reply_text(token, content)
-                return SendResult(success=True, message_id=token)
-            except Exception as exc:
-                logger.info(
-                    "Eko: reply token rejected (%s); falling back to push", exc
-                )
-                # Fall through to push.
-
-        try:
-            if is_group and routing:
-                await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
-            else:
-                await self._client.push_text(uid, content)
-            return SendResult(success=True, message_id=None)
-        except RuntimeError as exc:
-            logger.error("Eko: push send failed: %s", exc)
-            return SendResult(success=False, error=str(exc), retryable=True)
-        except Exception as exc:
-            logger.error("Eko: send failed: %s", exc)
-            return SendResult(success=False, error=str(exc), retryable=True)
-
-    async def _send_push_only(
-        self, chat_id: str, content: str
-    ) -> SendResult:
-        """Send content via push API only (for chunk N+1)."""
-        uid = self._resolve_uid(chat_id)
-        routing = self._get_routing(chat_id)
-        is_group = self._is_group_chat(chat_id)
-
-        async def _do_push():
-            if is_group and routing:
-                await self._client.push_group_text(routing["groupId"], routing["topicId"], content)
-            else:
-                await self._client.push_text(uid, content)
-
-        try:
-            await _do_push()
-            return SendResult(success=True, message_id=None)
-        except Exception as exc:
-            logger.error("Eko: push chunk failed: %s", exc)
-            return SendResult(success=False, error=str(exc), retryable=True)
-
     # ------------------------------------------------------------------
     # Outbound send (images and files)
     # ------------------------------------------------------------------
@@ -755,11 +758,10 @@ class EkoAdapter(BasePlatformAdapter):
             # Check file size before reading into memory.
             try:
                 file_size = fpath.stat().st_size
-                max_upload = getattr(self, 'max_upload_bytes', DEFAULT_MAX_UPLOAD_BYTES)
-                if max_upload and file_size > max_upload:
+                if not self._get_sender().check_size(file_size):
                     return SendResult(
                         success=False,
-                        error=f"Image file too large ({file_size} bytes, limit {max_upload})",
+                        error=f"Image file too large ({file_size} bytes, limit {self.max_upload_bytes})",
                     )
             except OSError:
                 pass  # stat failed; let read_bytes try
@@ -768,32 +770,12 @@ class EkoAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Cannot read image: {exc}")
 
         filename = Path(image_path).name or "image.jpg"
-        uid = self._resolve_uid(chat_id)
-        routing = self._get_routing(chat_id)
-        is_group = self._is_group_chat(chat_id)
         _caption = caption or ""
 
-        async def _do_push_picture():
-            if is_group and routing:
-                await self._client.push_group_picture(
-                    routing["groupId"], routing["topicId"],
-                    file_bytes, filename, caption=_caption,
-                )
-            else:
-                await self._client.push_picture(uid, file_bytes, filename, caption=_caption)
-
-        # Try reply token first, fall back to push.
-        token, used_reply = self._consume_reply_token(chat_id)
-        if used_reply:
-            try:
-                await self._client.reply_picture(token, file_bytes, filename)
-                return SendResult(success=True, message_id=token)
-            except Exception as exc:
-                logger.info("Eko: reply picture rejected (%s); falling back to push", exc)
-
         try:
-            await _do_push_picture()
-            return SendResult(success=True, message_id=None)
+            return await self._get_sender().send_image(
+                chat_id, file_bytes, filename, caption=_caption
+            )
         except RuntimeError as exc:
             return SendResult(success=False, error=str(exc), retryable=True)
         except Exception as exc:
@@ -845,11 +827,10 @@ class EkoAdapter(BasePlatformAdapter):
             # Check file size before reading into memory.
             try:
                 file_size = fpath.stat().st_size
-                max_upload = getattr(self, 'max_upload_bytes', DEFAULT_MAX_UPLOAD_BYTES)
-                if max_upload and file_size > max_upload:
+                if not self._get_sender().check_size(file_size):
                     return SendResult(
                         success=False,
-                        error=f"File too large ({file_size} bytes, limit {max_upload})",
+                        error=f"File too large ({file_size} bytes, limit {self.max_upload_bytes})",
                     )
             except OSError:
                 pass  # stat failed; let read_bytes try
@@ -858,23 +839,9 @@ class EkoAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Cannot read file: {exc}")
 
         filename = file_name or Path(file_path).name or "document"
-        uid = self._resolve_uid(chat_id)
-        routing = self._get_routing(chat_id)
-        is_group = self._is_group_chat(chat_id)
 
-        async def _do_push_file():
-            if is_group and routing:
-                await self._client.push_group_file(
-                    routing["groupId"], routing["topicId"],
-                    file_bytes, filename,
-                )
-            else:
-                await self._client.push_file(uid, file_bytes, filename)
-
-        # No reply-token endpoint documented for files — always push.
         try:
-            await _do_push_file()
-            return SendResult(success=True, message_id=None)
+            return await self._get_sender().send_file(chat_id, file_bytes, filename)
         except RuntimeError as exc:
             return SendResult(success=False, error=str(exc), retryable=True)
         except Exception as exc:
@@ -1007,10 +974,7 @@ async def _standalone_send(
     or documents (detected by extension).  ``force_document`` sends all files
     as documents regardless of extension.
 
-    Supports group/topic routing: when the live gateway adapter is available,
-    resolves ``chat_id`` through its ``_session_routing`` dict to determine
-    DM vs group endpoints.  Falls back to DM endpoints when no routing
-    metadata is available.
+    Route resolution is delegated to OutboundSender.resolve_route().
     """
     extra = getattr(pconfig, "extra", {}) or {}
     base_url = os.getenv("EKO_BASE_URL") or extra.get("base_url", "")
@@ -1021,38 +985,39 @@ async def _standalone_send(
 
     client = _EkoClient(base_url, client_id, client_secret)
 
-    # Resolve group/topic routing.
-    # 1. Explicit routing format (group:<gid>:topic:<tid>) — works without gateway.
-    # 2. Live adapter routing — requires running gateway.
-    routing: Optional[Dict[str, str]] = None
-    is_group = False
-    explicit = _parse_explicit_routing(chat_id)
-    if explicit is not None:
-        if "error" in explicit:
-            return {"error": explicit["error"]}
-        routing = explicit
-        is_group = True
-    else:
+    # Build session_routing from live adapter if available, for resolve_route().
+    session_routing: Dict[str, Dict[str, str]] = {}
+    # Skip live adapter lookup if explicit routing will handle it.
+    needs_live = not chat_id.startswith("group:")
+    if needs_live:
         try:
             from gateway.run import _gateway_runner_ref
             from gateway.config import Platform as _Platform
             _runner = _gateway_runner_ref()
             if _runner:
                 _adapter = _runner.adapters.get(_Platform("eko"))
-                if _adapter and hasattr(_adapter, "_get_routing"):
-                    routing = _adapter._get_routing(chat_id)
-                    if routing and routing.get("groupId") and routing.get("topicId"):
-                        is_group = True
+                if _adapter:
+                    routing = _adapter._get_routing(chat_id) if hasattr(_adapter, "_get_routing") else None
+                    if routing:
+                        session_routing[chat_id] = routing
         except Exception:
             pass
+
+    cfg = EkoConfig.from_env(extra)
+    sender = OutboundSender(
+        config=cfg,
+        client=client,
+        session_routing=session_routing,
+        reply_tokens={},  # standalone: no reply tokens
+    )
+    route = sender.resolve_route(chat_id)
+    if route.error:
+        return {"error": route.error}
 
     # Send text body.
     if message:
         try:
-            if is_group and routing:
-                await client.push_group_text(routing["groupId"], routing["topicId"], message)
-            else:
-                await client.push_text(chat_id, message)
+            await sender.send_text(chat_id, message)
         except Exception as exc:
             return {"error": str(exc)}
 
@@ -1060,23 +1025,14 @@ async def _standalone_send(
     _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     media_warnings: List[str] = []
 
-    # Resolve upload size limit from env/config.
-    try:
-        max_upload = int(
-            os.getenv("EKO_MAX_UPLOAD_BYTES")
-            or extra.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
-        )
-    except (TypeError, ValueError):
-        max_upload = DEFAULT_MAX_UPLOAD_BYTES
-
     for media_path in media_files or []:
         try:
             from pathlib import Path
             p = Path(media_path)
             file_size = p.stat().st_size
-            if max_upload and file_size > max_upload:
+            if not sender.check_size(file_size):
                 media_warnings.append(
-                    f"File too large: {p.name} ({file_size} bytes, limit {max_upload})"
+                    f"File too large: {p.name} ({file_size} bytes, limit {cfg.max_upload_bytes})"
                 )
                 continue
             file_bytes = p.read_bytes()
@@ -1088,15 +1044,9 @@ async def _standalone_send(
 
         try:
             if not force_document and ext in _IMAGE_EXTS:
-                if is_group and routing:
-                    await client.push_group_picture(routing["groupId"], routing["topicId"], file_bytes, filename)
-                else:
-                    await client.push_picture(chat_id, file_bytes, filename)
+                await sender.send_image(chat_id, file_bytes, filename)
             else:
-                if is_group and routing:
-                    await client.push_group_file(routing["groupId"], routing["topicId"], file_bytes, filename)
-                else:
-                    await client.push_file(chat_id, file_bytes, filename)
+                await sender.send_file(chat_id, file_bytes, filename)
         except Exception as exc:
             media_warnings.append(f"Failed to send {filename}: {exc}")
 
