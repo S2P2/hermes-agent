@@ -21,6 +21,7 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 - File sending (push to user or group/topic)
 - Cron media attachments (images and files via standalone sender)
 - Group/topic-aware outbound routing (auto-detects DM vs group)
+- Quick replies for interactive prompts (clarify choices, slash confirmations, dangerous-command approvals)
 - Management tools: create groups, create topics, query users from agent chat
 
 ## Prerequisites
@@ -272,6 +273,11 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 ## Version History
 
+### v1.9.0
+
+- **Quick replies for interactive prompts.** Clarify choices, slash confirmations, and dangerous-command approvals render as Eko quick-reply buttons via `/bot/v1/message/quickreply` when a reply token is available. Button `value` fields use slash commands (`/approve`, `/deny`, etc.) so taps bypass the agent-active message queue. Falls back to plain text when no token is available (PR #53).
+- 22 new tests (230 total, up from 208).
+
 ### v1.8.0
 
 - **Group/topic metadata from `get_chat_info`.** `get_chat_info()` now returns `type`, `group_id`, `topic_id`, `user_id`, and `group_type` by consulting `_session_routing`. Group chats use `groupId` as `chat_name`; DMs use sender `username`. `topicId` flows through as `thread_id` via `HERMES_SESSION_THREAD_ID` (Issue #30).
@@ -335,9 +341,6 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 - Webhook signature verification via `X-Eko-Signature` (HMAC-SHA256-Base64)
 - Image receiving: download inbound pictures, cache locally, vision tool integration
 - Image sending: native multipart upload with reply token + push fallback
-- Selectable prompts: clarify choices, slash confirmations, and dangerous
-  command approvals use Eko quick replies via `/bot/v1/message/quickreply`
-  when a reply token is available, with text fallback otherwise
 - File sending: push files to users via multipart upload
 - Sticker webhook events: surface `[sticker]` placeholder
 
