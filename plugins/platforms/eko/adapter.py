@@ -36,6 +36,26 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Load EkoConfig — same fallback pattern as _EkoClient below.
+try:
+    from .config import EkoConfig  # noqa: F401
+except ImportError:
+    import importlib.util as _ilu_config
+    import sys as _sys_config
+    from pathlib import Path as _Path_config
+
+    _cfg_path = _Path_config(__file__).with_name("config.py")
+    _cfg_spec = _ilu_config.spec_from_file_location(
+        "plugins.platforms.eko.config", _cfg_path
+    )
+    if _cfg_spec and _cfg_spec.loader:
+        _cfg_mod = _ilu_config.module_from_spec(_cfg_spec)
+        _sys_config.modules["plugins.platforms.eko.config"] = _cfg_mod
+        _cfg_spec.loader.exec_module(_cfg_mod)
+        EkoConfig = _cfg_mod.EkoConfig
+    else:
+        raise ImportError(f"Cannot load EkoConfig from {_cfg_path}")
+
 logger = logging.getLogger(__name__)
 
 from gateway.platforms.base import (
@@ -50,30 +70,20 @@ from gateway.config import Platform
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_WEBHOOK_PORT = 8647
-DEFAULT_WEBHOOK_PATH = "/eko/webhook"
-DEFAULT_REPLY_TOKEN_TTL = 50  # conservative below Eko's estimated ~60 s
+#
+# Constants are retained in config.py as the single source of truth.
+# The aliases below are still referenced by adapter internals.
+#
+
 WEBHOOK_BODY_MAX_BYTES = 1_048_576  # 1 MiB
-DEFAULT_MESSAGE_MAX_CHARS = 5000  # conservative until Eko limit confirmed
 DEFAULT_MAX_UPLOAD_BYTES = 26_214_400  # 25 MiB
 DEFAULT_MAX_INBOUND_MEDIA_BYTES = 26_214_400  # 25 MiB
+DEFAULT_MESSAGE_MAX_CHARS = 5000
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _csv_set(value: str) -> Set[str]:
-    if not value:
-        return set()
-    return {x.strip() for x in value.split(",") if x.strip()}
-
-
-def _truthy_env(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "on"}
+# Legacy defaults still referenced via getattr fallbacks in send methods.
+DEFAULT_WEBHOOK_PORT = 8647
+DEFAULT_WEBHOOK_PATH = "/eko/webhook"
+DEFAULT_REPLY_TOKEN_TTL = 50
 
 
 def _parse_explicit_routing(chat_id: str) -> Optional[Dict[str, str]]:
@@ -157,105 +167,7 @@ class EkoAdapter(BasePlatformAdapter):
         super().__init__(config=config, platform=platform)
 
         extra = getattr(config, "extra", {}) or {}
-
-        # Required credentials
-        self.base_url = (
-            os.getenv("EKO_BASE_URL") or extra.get("base_url", "")
-        ).rstrip("/")
-        self.oauth_client_id = (
-            os.getenv("EKO_OAUTH_CLIENT_ID")
-            or extra.get("oauth_client_id", "")
-        )
-        self.oauth_client_secret = (
-            os.getenv("EKO_OAUTH_CLIENT_SECRET")
-            or extra.get("oauth_client_secret", "")
-        )
-        self.webhook_secret = (
-            os.getenv("EKO_WEBHOOK_SECRET")
-            or extra.get("webhook_secret", "")
-        ) or self.oauth_client_secret
-        self.require_signature = _truthy_env(
-            "EKO_REQUIRE_SIGNATURE", bool(extra.get("require_signature", True))
-        )
-
-        # Webhook server
-        self.webhook_host = os.getenv("EKO_HOST") or extra.get("host", "0.0.0.0")
-        try:
-            self.webhook_port = int(
-                os.getenv("EKO_PORT") or extra.get("port", DEFAULT_WEBHOOK_PORT)
-            )
-        except (TypeError, ValueError):
-            self.webhook_port = DEFAULT_WEBHOOK_PORT
-        self.webhook_path = (
-            os.getenv("EKO_WEBHOOK_PATH")
-            or extra.get("webhook_path", DEFAULT_WEBHOOK_PATH)
-        )
-
-        # Allowlist
-        self.allow_all = _truthy_env(
-            "EKO_ALLOW_ALL_USERS", bool(extra.get("allow_all_users", False))
-        )
-        self.allowed_users = _csv_set(
-            os.getenv("EKO_ALLOWED_USERS", "")
-        ) | set(extra.get("allowed_users", []))
-
-        # Group/topic allowlist (#26)
-        self.allow_all_groups = _truthy_env(
-            "EKO_ALLOW_ALL_GROUPS", bool(extra.get("allow_all_groups", True))
-        )
-        self.allowed_groups = _csv_set(
-            os.getenv("EKO_ALLOWED_GROUPS", "")
-        ) | set(extra.get("allowed_groups", []))
-        # Topics use gid:tid format
-        self.allowed_topics = _csv_set(
-            os.getenv("EKO_ALLOWED_TOPICS", "")
-        ) | set(extra.get("allowed_topics", []))
-
-        # Require mention in groups (#22)
-        self.require_mention = _truthy_env(
-            "EKO_REQUIRE_MENTION", bool(extra.get("require_mention", True))
-        )
-        _triggers = (
-            os.getenv("EKO_MENTION_TRIGGERS", "")
-            or ",".join(extra.get("mention_triggers", []))
-        )
-        self.mention_triggers = [w.strip() for w in _triggers.split(",") if w.strip()]
-
-        # Reply token TTL
-        try:
-            self.reply_token_ttl = float(
-                os.getenv("EKO_REPLY_TOKEN_TTL")
-                or extra.get("reply_token_ttl", DEFAULT_REPLY_TOKEN_TTL)
-            )
-        except (TypeError, ValueError):
-            self.reply_token_ttl = DEFAULT_REPLY_TOKEN_TTL
-
-        # Outbound message chunking
-        try:
-            self.message_max_chars = int(
-                os.getenv("EKO_MESSAGE_MAX_CHARS")
-                or extra.get("message_max_chars", DEFAULT_MESSAGE_MAX_CHARS)
-            )
-        except (TypeError, ValueError):
-            self.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
-
-        # Upload size limit (outbound)
-        try:
-            self.max_upload_bytes = int(
-                os.getenv("EKO_MAX_UPLOAD_BYTES")
-                or extra.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
-            )
-        except (TypeError, ValueError):
-            self.max_upload_bytes = DEFAULT_MAX_UPLOAD_BYTES
-
-        # Inbound media size limit
-        try:
-            self.max_inbound_media_bytes = int(
-                os.getenv("EKO_MAX_INBOUND_MEDIA_BYTES")
-                or extra.get("max_inbound_media_bytes", DEFAULT_MAX_INBOUND_MEDIA_BYTES)
-            )
-        except (TypeError, ValueError):
-            self.max_inbound_media_bytes = DEFAULT_MAX_INBOUND_MEDIA_BYTES
+        self._eko_config = EkoConfig.from_env(extra)
 
         # Runtime state
         self._client: Optional[_EkoClient] = None
@@ -270,6 +182,36 @@ class EkoAdapter(BasePlatformAdapter):
         # Reserved for future self-message filtering if Eko provides
         # a bot identity API.
         self._bot_user_id: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Config delegation — reads fall through to _eko_config, writes
+    # land on self.__dict__ (backward compat for test helpers that
+    # use __new__ + direct attr assignment).
+    # ------------------------------------------------------------------
+
+    _CONFIG_ATTRS = frozenset({
+        "base_url", "oauth_client_id", "oauth_client_secret",
+        "webhook_secret", "require_signature",
+        "webhook_host", "webhook_port", "webhook_path",
+        "allow_all", "allowed_users",
+        "allow_all_groups", "allowed_groups", "allowed_topics",
+        "require_mention", "mention_triggers",
+        "reply_token_ttl", "message_max_chars",
+        "max_upload_bytes", "max_inbound_media_bytes",
+    })
+
+    def __getattr__(self, name: str):
+        if name in self._CONFIG_ATTRS:
+            try:
+                cfg = self.__dict__["_eko_config"]
+            except KeyError:
+                raise AttributeError(name)
+            # Map legacy "allow_all" to EkoConfig's "allow_all_users"
+            cfg_name = "allow_all_users" if name == "allow_all" else name
+            return getattr(cfg, cfg_name)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -1006,11 +948,7 @@ class EkoAdapter(BasePlatformAdapter):
 
 def check_requirements() -> bool:
     """Plugin gate: require credentials AND aiohttp at runtime."""
-    if not os.getenv("EKO_BASE_URL"):
-        return False
-    if not os.getenv("EKO_OAUTH_CLIENT_ID"):
-        return False
-    if not os.getenv("EKO_OAUTH_CLIENT_SECRET"):
+    if not EkoConfig.from_env().has_credentials():
         return False
     try:
         import aiohttp  # noqa: F401
@@ -1021,14 +959,7 @@ def check_requirements() -> bool:
 
 def validate_config(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
-    has_url = bool(os.getenv("EKO_BASE_URL") or extra.get("base_url"))
-    has_id = bool(
-        os.getenv("EKO_OAUTH_CLIENT_ID") or extra.get("oauth_client_id")
-    )
-    has_secret = bool(
-        os.getenv("EKO_OAUTH_CLIENT_SECRET") or extra.get("oauth_client_secret")
-    )
-    return has_url and has_id and has_secret
+    return EkoConfig.from_env(extra).has_credentials()
 
 
 def is_connected(config) -> bool:
