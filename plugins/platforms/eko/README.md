@@ -161,6 +161,29 @@ tools:
 These tools are **async** and gated on the Eko adapter being connected in the gateway.
 They disappear from the tool list when the gateway isn't running.
 
+### Restricting management tools
+
+Use the ``eko.management_actions`` config key to control which management tools
+the agent can use. When unset (default), all three tools are available.
+
+```yaml
+# ~/.hermes/config.yaml
+eko:
+  management_actions:
+    - query_users          # read-only, safe
+    - create_topic         # creates but doesn't add members
+    # create_group omitted → agent cannot create groups
+```
+
+Accepts a YAML list or a comma-separated string. Unknown action names are
+logged as warnings and ignored.
+
+| Action | Tool | Description |
+|--------|------|-------------|
+| `create_group` | `eko_create_group` | Create group chats |
+| `create_topic` | `eko_create_topic` | Create topics in groups |
+| `query_users` | `eko_query_users` | Look up user IDs |
+
 ### Example usage in chat
 
 ```
@@ -232,6 +255,11 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 | Group chat | `{groupId}_{topicId}` | `group` |
 
 ## Version History
+
+### v1.7.0
+
+- **Management actions config gate.** New `eko.management_actions` config key controls which management tools the agent can use. Unset = all allowed (backward compatible). Set to a list to restrict; e.g. `query_users` only gives read-only access. Unknown action names are logged as warnings and ignored (Issue #23).
+- 14 new tests (159 total, up from 145).
 
 ### v1.6.0
 
@@ -311,7 +339,7 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Management actions config gate | `eko.management_actions` allowlist to control which tools are available | Issue #23 |
+| ~~Management actions config gate~~ | `eko.management_actions` allowlist to control which tools are available | Issue #23 ✅ |
 | Connection pooling | Reuse `aiohttp.ClientSession` across requests | Current pattern creates one per request (matches LINE adapter) |
 | Typing indicator | Show agent-is-working feedback | Eko may not have a typing API — needs investigation |
 | Markdown formatting | Test if Eko renders any formatting, adjust `format_message()` | Currently passes text through as-is |
