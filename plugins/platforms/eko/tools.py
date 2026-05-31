@@ -145,10 +145,35 @@ async def _handle_create_group(args: dict, **kw) -> str:
             users = await client.query_users(username)
         except Exception as exc:
             return tool_error(f"Failed to query user '{username}': {exc}")
-        if not users:
+        if not isinstance(users, list) or not users:
             return tool_error(f"User '{username}' not found")
-        # Take the first match.
-        uids.append(str(users[0].get("_id", "")))
+
+        # Exact match only.
+        exact = [u for u in users if u.get("username") == username]
+        if len(exact) == 1:
+            uid = str(exact[0].get("_id", "")).strip()
+            if not uid:
+                return tool_error(
+                    f"User '{username}' has no valid user ID"
+                )
+            uids.append(uid)
+        elif len(exact) > 1:
+            candidates = ", ".join(
+                f"{u.get('username')} ({u.get('_id', '?')})" for u in exact
+            )
+            return tool_error(
+                f"Username '{username}' is ambiguous — "
+                f"multiple exact matches: {candidates}"
+            )
+        else:
+            # No exact match; show fuzzy candidates so the user can refine.
+            candidates = ", ".join(
+                f"{u.get('username')} ({u.get('_id', '?')})" for u in users
+            )
+            return tool_error(
+                f"User '{username}' not found. "
+                f"Similar users: {candidates}"
+            )
 
     name = str(args.get("name") or "").strip()
 
