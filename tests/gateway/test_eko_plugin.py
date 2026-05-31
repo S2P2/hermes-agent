@@ -1618,6 +1618,7 @@ class TestTopicRouting:
         call_args = adapter.handle_message.call_args[0][0]
         assert call_args.source.chat_name == "grp_1"
         assert call_args.source.chat_type == "group"
+        assert call_args.source.thread_id == "topic_1"
 
     @pytest.mark.asyncio
     async def test_dm_chat_name_uses_username(self):
@@ -1644,6 +1645,7 @@ class TestTopicRouting:
         call_args = adapter.handle_message.call_args[0][0]
         assert call_args.source.chat_name == "alice"
         assert call_args.source.chat_type == "dm"
+        assert call_args.source.thread_id == "topic_dm"
 
     @pytest.mark.asyncio
     async def test_topic_gets_separate_session(self):

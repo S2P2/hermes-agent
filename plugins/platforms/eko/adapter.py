@@ -555,6 +555,7 @@ class EkoAdapter(BasePlatformAdapter):
             user_id=uid,
             user_name=username,
             chat_name=effective_chat_name,
+            thread_id=topic_id or None,
         )
 
         event_obj = MessageEvent(
