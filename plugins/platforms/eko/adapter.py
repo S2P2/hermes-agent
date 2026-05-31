@@ -1525,8 +1525,11 @@ def register(ctx) -> None:
         allow_update_command=True,
         platform_hint=(
             "You are chatting via Eko Messaging API. "
+            "Eko renders plain text only — Markdown syntax appears as literal characters. "
+            "Bare URLs are auto-linked; use https://example.com instead of "
+            "[label](url). "
             "You can send images and files to the user using the send_message tool "
             "with MEDIA:<local_path> in the message. "
-            "Keep responses concise and well-structured."
+            "Keep responses concise."
         ),
     )
