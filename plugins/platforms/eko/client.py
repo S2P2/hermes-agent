@@ -254,6 +254,44 @@ class _EkoClient:
         data.add_field("replyToken", reply_token)
         await self._request_form("/bot/v1/message/text", data=data)
 
+    async def reply_quick_reply(
+        self,
+        reply_token: str,
+        message: str,
+        choices: List[str],
+        values: Optional[List[str]] = None,
+    ) -> None:
+        """Send a quick-reply prompt using a reply token.
+
+        ``choices`` sets the display label (``data.text``).  ``values`` sets
+        the reply payload (``value``).  When ``values`` is omitted, each
+        choice is used as its own value (backward-compatible).
+        """
+        items = [
+            {
+                "data": {"text": choice},
+                "type": "label",
+                "value": (values[i] if values else choice),
+            }
+            for i, choice in enumerate(choices)
+        ]
+        await self._request_json_post(
+            "/bot/v1/message/quickreply",
+            json={
+                "replyToken": reply_token,
+                "message": {
+                    "data": message,
+                    "meta": {
+                        "quickreply": {
+                            "template": "default",
+                            "items": items,
+                        }
+                    },
+                },
+            },
+            expect_json=False,
+        )
+
     async def push_text(self, uid: str, message: str) -> None:
         """Push a text message to a user by uid."""
         await self._request_json_post(

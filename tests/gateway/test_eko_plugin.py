@@ -643,6 +643,138 @@ class TestSendRouting:
 
 
 # ---------------------------------------------------------------------------
+# 5a. Selectable quick replies
+# ---------------------------------------------------------------------------
+
+class TestExecApprovalQuickReplies:
+
+    @pytest.mark.asyncio
+    async def test_send_exec_approval_uses_quick_reply_with_reply_token(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+
+        result = await adapter.send_exec_approval(
+            chat_id="chat1",
+            command="rm -rf /tmp/example",
+            session_key="sk-eko",
+            description="test approval",
+        )
+
+        assert result.success
+        adapter._client.reply_quick_reply.assert_called_once()
+        args, kwargs = adapter._client.reply_quick_reply.call_args
+        assert args[0] == "tok_abc"
+        assert "rm -rf /tmp/example" in args[1]
+        assert "test approval" in args[1]
+        assert args[2] == [
+            "Approve Once",
+            "Approve Session",
+            "Approve Always",
+            "Deny",
+        ]
+        assert kwargs["values"] == [
+            "/approve",
+            "/approve session",
+            "/approve always",
+            "/deny",
+        ]
+        assert "chat1" not in adapter._reply_tokens
+
+    @pytest.mark.asyncio
+    async def test_send_exec_approval_without_reply_token_uses_text_fallback(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+
+        result = await adapter.send_exec_approval(
+            chat_id="chat1",
+            command="rm -rf /tmp/example",
+            session_key="sk-eko",
+        )
+
+        assert not result.success
+        adapter._client.reply_quick_reply.assert_not_called()
+
+
+class TestSlashConfirmQuickReplies:
+
+    @pytest.mark.asyncio
+    async def test_send_slash_confirm_uses_quick_reply_with_reply_token(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+
+        result = await adapter.send_slash_confirm(
+            chat_id="chat1",
+            title="/new",
+            message="Confirm /new?",
+            session_key="sk-eko",
+            confirm_id="confirm-1",
+        )
+
+        assert result.success
+        adapter._client.reply_quick_reply.assert_called_once_with(
+            "tok_abc",
+            "Confirm /new?",
+            ["Approve Once", "Always Approve", "Cancel"],
+            values=["/approve", "/always", "/cancel"],
+        )
+        assert "chat1" not in adapter._reply_tokens
+
+    @pytest.mark.asyncio
+    async def test_send_slash_confirm_without_reply_token_uses_text_fallback(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {}
+        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+
+        result = await adapter.send_slash_confirm(
+            chat_id="chat1",
+            title="/new",
+            message="Confirm /new?",
+            session_key="sk-eko",
+            confirm_id="confirm-1",
+        )
+
+        assert not result.success
+        adapter._client.reply_quick_reply.assert_not_called()
+
+
+class TestClarifyQuickReplies:
+
+    @pytest.mark.asyncio
+    async def test_send_clarify_uses_quick_reply_with_reply_token(self):
+        from tools import clarify_gateway as cm
+
+        cm.clear_session("sk-eko")
+        cm.register("cid-eko", "sk-eko", "Pick one?", ["A", "B"])
+
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+
+        try:
+            result = await adapter.send_clarify(
+                chat_id="chat1",
+                question="Pick one?",
+                choices=["A", "B"],
+                clarify_id="cid-eko",
+                session_key="sk-eko",
+            )
+
+            assert result.success
+            adapter._client.reply_quick_reply.assert_called_once_with(
+                "tok_abc", "Pick one?", ["A", "B"]
+            )
+            assert "chat1" not in adapter._reply_tokens
+            pending = cm.get_pending_for_session("sk-eko")
+            assert pending is not None
+            assert pending.awaiting_text is True
+        finally:
+            cm.clear_session("sk-eko")
+
+
+# ---------------------------------------------------------------------------
 # 5b. Outbound chunking
 # ---------------------------------------------------------------------------
 
@@ -1050,6 +1182,29 @@ class TestEkoClientOutboundMedia:
         mock_session.post.assert_called_once()
         call_args = mock_session.post.call_args
         assert call_args[0][0].endswith("/bot/v1/message/picture")
+
+    @pytest.mark.asyncio
+    async def test_reply_quick_reply_sends_json(self):
+        mock_aiohttp = _mock_aiohttp_for_post(200)
+        client = _make_eko_client()
+
+        with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
+            await client.reply_quick_reply(
+                "reply_tok", "Pick one?", ["A", "B"], values=["/a", "/b"],
+            )
+
+        mock_session = mock_aiohttp.ClientSession.return_value
+        mock_session.post.assert_called_once()
+        call_args = mock_session.post.call_args
+        assert call_args[0][0].endswith("/bot/v1/message/quickreply")
+        payload = call_args.kwargs["json"]
+        assert payload["replyToken"] == "reply_tok"
+        assert payload["message"]["data"] == "Pick one?"
+        items = payload["message"]["meta"]["quickreply"]["items"]
+        assert items == [
+            {"data": {"text": "A"}, "type": "label", "value": "/a"},
+            {"data": {"text": "B"}, "type": "label", "value": "/b"},
+        ]
 
     @pytest.mark.asyncio
     async def test_push_file_sends_multipart(self):
