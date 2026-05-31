@@ -1,7 +1,7 @@
 name: eko-platform
 label: Eko
 kind: platform
-version: 1.0.0
+version: 1.8.0
 description: >
   Eko Messaging API gateway adapter for Hermes Agent.
   Runs an aiohttp webhook server that receives Eko webhook events
@@ -70,4 +70,24 @@ optional_env:
   - name: EKO_ALLOW_ALL_GROUPS
     description: "Allow all groups (default: true). Set false to activate group allowlist."
     prompt: "Allow all groups? (true/false)"
+    password: false
+  - name: EKO_WEBHOOK_SECRET
+    description: "Separate HMAC signing key for webhook signature verification (default: OAuth secret)"
+    prompt: "Webhook signing secret (blank = use OAuth secret)"
+    password: true
+  - name: EKO_REQUIRE_SIGNATURE
+    description: "Verify X-Eko-Signature on inbound webhooks (default: true)"
+    prompt: "Require webhook signature? (true/false)"
+    password: false
+  - name: EKO_MESSAGE_MAX_CHARS
+    description: "Max chars per outbound message; longer text is chunked (default: 5000)"
+    prompt: "Max message chars"
+    password: false
+  - name: EKO_MAX_UPLOAD_BYTES
+    description: "Max file size for outbound uploads in bytes (default: 26214400 = 25 MiB)"
+    prompt: "Max upload bytes"
+    password: false
+  - name: EKO_MAX_INBOUND_MEDIA_BYTES
+    description: "Max size for inbound picture downloads in bytes (default: 26214400 = 25 MiB)"
+    prompt: "Max inbound media bytes"
     password: false
