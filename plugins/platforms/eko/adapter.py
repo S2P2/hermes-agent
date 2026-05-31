@@ -74,6 +74,30 @@ def _truthy_env(name: str, default: bool = False) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_explicit_routing(chat_id: str) -> Optional[Dict[str, str]]:
+    """Parse explicit group/topic routing from a chat_id string.
+
+    Accepts the format ``group:<gid>:topic:<tid>`` and returns
+    ``{"groupId": gid, "topicId": tid}`` when valid, or ``None``
+    when the chat_id does not use the explicit routing format.
+
+    Returns a sentinel dict with an ``"error"`` key when the format
+    is recognised but malformed (missing gid or tid values).
+    """
+    if not chat_id.startswith("group:"):
+        return None
+    parts = chat_id.split(":")
+    # Expected: ["group", <gid>, "topic", <tid>]
+    if len(parts) != 4 or parts[2] != "topic":
+        return {"error": f"Invalid explicit routing format: {chat_id!r}. "
+                        f"Expected group:<gid>:topic:<tid>"}
+    gid, tid = parts[1], parts[3]
+    if not gid or not tid:
+        return {"error": f"Invalid explicit routing format: {chat_id!r}. "
+                        f"group ID and topic ID must be non-empty"}
+    return {"groupId": gid, "topicId": tid}
+
+
 def _guess_content_type(filename: str) -> str:
     """Guess MIME type from filename for multipart uploads."""
     import mimetypes
@@ -1393,21 +1417,30 @@ async def _standalone_send(
 
     client = _EkoClient(base_url, client_id, client_secret)
 
-    # Resolve group/topic routing from the live adapter when available.
+    # Resolve group/topic routing.
+    # 1. Explicit routing format (group:<gid>:topic:<tid>) — works without gateway.
+    # 2. Live adapter routing — requires running gateway.
     routing: Optional[Dict[str, str]] = None
     is_group = False
-    try:
-        from gateway.run import _gateway_runner_ref
-        from gateway.config import Platform as _Platform
-        _runner = _gateway_runner_ref()
-        if _runner:
-            _adapter = _runner.adapters.get(_Platform("eko"))
-            if _adapter and hasattr(_adapter, "_get_routing"):
-                routing = _adapter._get_routing(chat_id)
-                if routing and routing.get("groupId") and routing.get("topicId"):
-                    is_group = True
-    except Exception:
-        pass
+    explicit = _parse_explicit_routing(chat_id)
+    if explicit is not None:
+        if "error" in explicit:
+            return {"error": explicit["error"]}
+        routing = explicit
+        is_group = True
+    else:
+        try:
+            from gateway.run import _gateway_runner_ref
+            from gateway.config import Platform as _Platform
+            _runner = _gateway_runner_ref()
+            if _runner:
+                _adapter = _runner.adapters.get(_Platform("eko"))
+                if _adapter and hasattr(_adapter, "_get_routing"):
+                    routing = _adapter._get_routing(chat_id)
+                    if routing and routing.get("groupId") and routing.get("topicId"):
+                        is_group = True
+        except Exception:
+            pass
 
     # Send text body.
     if message:

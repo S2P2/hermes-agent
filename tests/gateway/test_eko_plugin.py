@@ -1831,6 +1831,155 @@ class TestStandaloneSendGroupRouting:
 
 
 # ---------------------------------------------------------------------------
+# 17b. _standalone_send explicit routing (no live gateway)
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneSendExplicitRouting:
+    """Tests for _standalone_send explicit group:<gid>:topic:<tid> routing.
+
+    These tests verify that standalone delivery (cron/scheduled jobs) can
+    target Eko groups/topics without a live gateway adapter, using the
+    explicit routing format in the chat_id.
+    """
+
+    def _cfg(self):
+        return _make_config({
+            "base_url": "https://eko.example.com",
+            "oauth_client_id": "id",
+            "oauth_client_secret": "secret",
+        })
+
+    @pytest.mark.asyncio
+    async def test_explicit_group_routing_text_no_live_adapter(self):
+        """Explicit group:<gid>:topic:<tid> routes to group endpoint without live adapter."""
+        with patch.object(_EkoClient, "push_group_text", new_callable=AsyncMock) as mock_group, \
+             patch("gateway.run._gateway_runner_ref", return_value=None):
+            result = await _standalone_send(
+                self._cfg(), "group:grp_42:topic:top_7", "hello from cron",
+            )
+        assert result["success"]
+        mock_group.assert_called_once_with("grp_42", "top_7", "hello from cron")
+
+    @pytest.mark.asyncio
+    async def test_explicit_group_routing_file_no_live_adapter(self, tmp_path):
+        """Explicit group routing sends files to group endpoint without live adapter."""
+        doc = tmp_path / "report.pdf"
+        doc.write_bytes(b"%PDF-fake")
+
+        with patch.object(_EkoClient, "push_group_file", new_callable=AsyncMock) as mock_group_file, \
+             patch("gateway.run._gateway_runner_ref", return_value=None):
+            result = await _standalone_send(
+                self._cfg(), "group:grp_42:topic:top_7", "", media_files=[str(doc)],
+            )
+        assert result["success"]
+        mock_group_file.assert_called_once()
+        args = mock_group_file.call_args
+        assert args[0][0] == "grp_42"
+        assert args[0][1] == "top_7"
+
+    @pytest.mark.asyncio
+    async def test_explicit_group_routing_image_no_live_adapter(self, tmp_path):
+        """Explicit group routing sends images to group endpoint without live adapter."""
+        img = tmp_path / "photo.jpg"
+        img.write_bytes(b"\xff\xd8\xff\xe0JPG")
+
+        with patch.object(_EkoClient, "push_group_picture", new_callable=AsyncMock) as mock_group_pic, \
+             patch("gateway.run._gateway_runner_ref", return_value=None):
+            result = await _standalone_send(
+                self._cfg(), "group:grp_42:topic:top_7", "", media_files=[str(img)],
+            )
+        assert result["success"]
+        mock_group_pic.assert_called_once()
+        args = mock_group_pic.call_args
+        assert args[0][0] == "grp_42"
+        assert args[0][1] == "top_7"
+
+    @pytest.mark.asyncio
+    async def test_normal_dm_target_no_live_adapter(self):
+        """Non-explicit chat_id falls back to DM push when no live adapter."""
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push, \
+             patch("gateway.run._gateway_runner_ref", return_value=None):
+            result = await _standalone_send(
+                self._cfg(), "user_123", "hello dm",
+            )
+        assert result["success"]
+        mock_push.assert_called_once_with("user_123", "hello dm")
+
+    @pytest.mark.asyncio
+    async def test_malformed_explicit_routing_returns_error(self):
+        """Malformed explicit routing returns clear error, not DM fallback."""
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push, \
+             patch.object(_EkoClient, "push_group_text", new_callable=AsyncMock) as mock_group, \
+             patch("gateway.run._gateway_runner_ref", return_value=None):
+            result = await _standalone_send(
+                self._cfg(), "group:grp_42:topic:", "hello",
+            )
+        assert "error" in result
+        assert not result.get("success", False)
+        mock_push.assert_not_called()
+        mock_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_malformed_explicit_routing_missing_topic(self):
+        """group:<gid> without topic returns clear error."""
+        with patch.object(_EkoClient, "push_text", new_callable=AsyncMock) as mock_push, \
+             patch.object(_EkoClient, "push_group_text", new_callable=AsyncMock) as mock_group, \
+             patch("gateway.run._gateway_runner_ref", return_value=None):
+            result = await _standalone_send(
+                self._cfg(), "group:grp_42", "hello",
+            )
+        assert "error" in result
+        assert not result.get("success", False)
+        mock_push.assert_not_called()
+        mock_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_routing_preferred_over_live_adapter_valid(self):
+        """Explicit routing takes priority over live adapter routing."""
+        mock_adapter = MagicMock()
+        mock_adapter._get_routing.return_value = {
+            "uid": "user_1",
+            "groupId": "old_g",
+            "topicId": "old_t",
+            "groupType": "team",
+        }
+        mock_runner = MagicMock()
+        mock_runner.adapters = {Platform("eko"): mock_adapter}
+
+        with patch.object(_EkoClient, "push_group_text", new_callable=AsyncMock) as mock_group, \
+             patch("gateway.run._gateway_runner_ref", return_value=mock_runner):
+            result = await _standalone_send(
+                self._cfg(), "group:explicit_g:topic:explicit_t", "hello",
+            )
+        assert result["success"]
+        mock_group.assert_called_once_with("explicit_g", "explicit_t", "hello")
+        # Live adapter routing was NOT consulted.
+        mock_adapter._get_routing.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_live_adapter_fallback_still_works(self):
+        """Without explicit routing, live adapter routing still works."""
+        mock_adapter = MagicMock()
+        mock_adapter._get_routing.return_value = {
+            "uid": "user_1",
+            "groupId": "g1",
+            "topicId": "t1",
+            "groupType": "team",
+        }
+        mock_runner = MagicMock()
+        mock_runner.adapters = {Platform("eko"): mock_adapter}
+
+        with patch.object(_EkoClient, "push_group_text", new_callable=AsyncMock) as mock_group, \
+             patch("gateway.run._gateway_runner_ref", return_value=mock_runner):
+            result = await _standalone_send(
+                self._cfg(), "g1_t1", "hello",
+            )
+        assert result["success"]
+        mock_group.assert_called_once_with("g1", "t1", "hello")
+
+
+# ---------------------------------------------------------------------------
 # 18. _send_eko_media group routing (via live adapter)
 # ---------------------------------------------------------------------------
 
