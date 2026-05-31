@@ -11,6 +11,8 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 - Reply token (free) with automatic push fallback
 - Event deduplication
 - User allowlist gating
+- Group/topic allowlist gating
+- Require-mention filtering for group chats
 - Cron/notification delivery
 - Interactive setup wizard (`hermes gateway setup`)
 - Webhook signature verification (`X-Eko-Signature` HMAC-SHA256)
@@ -133,6 +135,11 @@ Open Eko, create a 1:1 chat with the bot, and send a message.
 | `EKO_MESSAGE_MAX_CHARS` | No | `5000` | Max chars per outbound message (chunks longer text) |
 | `EKO_MAX_UPLOAD_BYTES` | No | `26214400` | Max file size for outbound uploads (25 MiB). Oversized files are rejected before reading into memory. |
 | `EKO_MAX_INBOUND_MEDIA_BYTES` | No | `26214400` | Max size for inbound picture downloads (25 MiB). Oversized downloads are discarded. |
+| `EKO_REQUIRE_MENTION` | No | `true` | Only respond to group messages containing a trigger word. DMs always respond. |
+| `EKO_MENTION_TRIGGERS` | No | `hermes` | Comma-separated trigger words for require_mention. Default: `hermes`. |
+| `EKO_ALLOWED_GROUPS` | No | (empty) | Comma-separated group IDs the bot responds to. |
+| `EKO_ALLOWED_TOPICS` | No | (empty) | Comma-separated `gid:tid` pairs for topic-level allowlist. |
+| `EKO_ALLOW_ALL_GROUPS` | No | `true` | Allow all groups (default). Set `false` to activate group/topic allowlist. |
 
 ## Agent Tools
 
@@ -233,6 +240,12 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 ## Version History
 
+### v1.7.0
+
+- **Require-mention filter for group chats.** `EKO_REQUIRE_MENTION=true` makes the bot only respond to group messages that contain a trigger word (default: `hermes`). DMs always respond. Customizable via `EKO_MENTION_TRIGGERS`. Case-insensitive, word-boundary matching, works anywhere in text (matches Eko's `@BotName` plain-text mention format).
+- **Group/topic allowlist.** `EKO_ALLOW_ALL_GROUPS=false` restricts the bot to specific groups (`EKO_ALLOWED_GROUPS`) or topics (`EKO_ALLOWED_TOPICS` in `gid:tid` format). Both filters compose: a message must pass the group allowlist AND mention check. DMs are unaffected (Issue #26).
+- 24 new tests (174 total, up from 150).
+
 ### v1.6.0
 
 - **Standalone group/topic routing.** Cron/scheduled jobs can target Eko groups/topics without a running gateway using the explicit routing format `group:<gid>:topic:<tid>` in the chat_id. Malformed routing returns a clear error instead of silently falling back to DM (Issue #25).
@@ -298,20 +311,19 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 | Feature | Description | Eko API |
 |---------|-------------|--------|
-| Group allowlist | Allow/deny specific groups (currently only user-level allowlist) | Needs testing |
+| `get_chat_info` group metadata | Return group/topic metadata from `get_chat_info` | Issue #30 |
 
 ### Medium priority
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| `require_mention` config | Bot only responds when @mentioned in group chats (DMs always respond) | Issue #22 |
 | Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
+| Compact tool progress | One-shot progress message on no-edit platforms | Issue #32 (pended — core gateway change) |
 
 ### Low priority
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Management actions config gate | `eko.management_actions` allowlist to control which tools are available | Issue #23 |
 | Connection pooling | Reuse `aiohttp.ClientSession` across requests | Current pattern creates one per request (matches LINE adapter) |
 | Typing indicator | Show agent-is-working feedback | Eko may not have a typing API — needs investigation |
 | Markdown formatting | Test if Eko renders any formatting, adjust `format_message()` | Currently passes text through as-is |

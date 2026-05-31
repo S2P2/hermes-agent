@@ -51,3 +51,23 @@ optional_env:
     description: "Reply-token TTL in seconds (default: 50)"
     prompt: "Reply token TTL (seconds)"
     password: false
+  - name: EKO_REQUIRE_MENTION
+    description: "Only respond to group messages containing a trigger word (default: true)"
+    prompt: "Require mention in groups? (true/false)"
+    password: false
+  - name: EKO_MENTION_TRIGGERS
+    description: "Comma-separated trigger words for require_mention (default: hermes)"
+    prompt: "Mention trigger words (comma-separated)"
+    password: false
+  - name: EKO_ALLOWED_GROUPS
+    description: "Comma-separated group IDs the bot responds to"
+    prompt: "Allowed group IDs (comma-separated)"
+    password: false
+  - name: EKO_ALLOWED_TOPICS
+    description: "Comma-separated gid:tid pairs for topic-level allowlist"
+    prompt: "Allowed topics (gid:tid, comma-separated)"
+    password: false
+  - name: EKO_ALLOW_ALL_GROUPS
+    description: "Allow all groups (default: true). Set false to activate group allowlist."
+    prompt: "Allow all groups? (true/false)"
+    password: false
