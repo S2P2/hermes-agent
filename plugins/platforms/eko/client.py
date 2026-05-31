@@ -259,15 +259,21 @@ class _EkoClient:
         reply_token: str,
         message: str,
         choices: List[str],
+        values: Optional[List[str]] = None,
     ) -> None:
-        """Send a quick-reply prompt using a reply token."""
+        """Send a quick-reply prompt using a reply token.
+
+        ``choices`` sets the display label (``data.text``).  ``values`` sets
+        the reply payload (``value``).  When ``values`` is omitted, each
+        choice is used as its own value (backward-compatible).
+        """
         items = [
             {
                 "data": {"text": choice},
                 "type": "label",
-                "value": choice,
+                "value": (values[i] if values else choice),
             }
-            for choice in choices
+            for i, choice in enumerate(choices)
         ]
         await self._request_json_post(
             "/bot/v1/message/quickreply",

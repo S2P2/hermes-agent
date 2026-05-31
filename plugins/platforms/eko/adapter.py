@@ -683,8 +683,9 @@ class EkoAdapter(BasePlatformAdapter):
 
         Eko quick replies are reply-token only.  If no fresh token is
         available, return unsupported so the gateway sends its text fallback.
-        Quick-reply taps arrive as ordinary text; gateway text handling maps
-        these labels to the same approval actions as typed slash commands.
+        Button ``value`` fields are set to slash commands (e.g. ``/approve``)
+        so the tap arrives as a real command that bypasses the agent-active
+        queue in base.py.
         """
         if not self._client:
             return SendResult(success=False, error="Eko adapter not connected")
@@ -705,6 +706,7 @@ class EkoAdapter(BasePlatformAdapter):
                 token,
                 prompt,
                 ["Approve Once", "Approve Session", "Approve Always", "Deny"],
+                values=["/approve", "/approve session", "/approve always", "/deny"],
             )
         except Exception as exc:
             logger.debug(
@@ -728,8 +730,9 @@ class EkoAdapter(BasePlatformAdapter):
 
         Eko quick replies are reply-token only.  If no fresh token is
         available, return unsupported so the gateway sends its text fallback.
-        Quick-reply taps arrive as ordinary text; the gateway already maps
-        "Approve Once" / "Always Approve" / "Cancel" to confirm choices.
+        Button ``value`` fields are set to slash commands (e.g. ``/approve``)
+        so the tap arrives as a real command that bypasses the agent-active
+        queue in base.py.
         """
         if not self._client:
             return SendResult(success=False, error="Eko adapter not connected")
@@ -743,6 +746,7 @@ class EkoAdapter(BasePlatformAdapter):
                 token,
                 message,
                 ["Approve Once", "Always Approve", "Cancel"],
+                values=["/approve", "/always", "/cancel"],
             )
         except Exception as exc:
             logger.debug(

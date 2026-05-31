@@ -191,28 +191,6 @@ class TestBlockingGatewayApproval:
 
 
 # ------------------------------------------------------------------
-# Quick-reply label mapping
-# ------------------------------------------------------------------
-
-
-class TestApprovalQuickReplyLabels:
-
-    def test_maps_exact_eko_labels_to_slash_commands(self):
-        from gateway.run import GatewayRunner
-
-        assert GatewayRunner._approval_command_for_text_reply("Approve Once") == "/approve"
-        assert GatewayRunner._approval_command_for_text_reply("Approve Session") == "/approve session"
-        assert GatewayRunner._approval_command_for_text_reply("Approve Always") == "/approve always"
-        assert GatewayRunner._approval_command_for_text_reply("Deny") == "/deny"
-
-    def test_ignores_non_label_text(self):
-        from gateway.run import GatewayRunner
-
-        assert GatewayRunner._approval_command_for_text_reply("yes") is None
-        assert GatewayRunner._approval_command_for_text_reply("approve") is None
-
-
-# ------------------------------------------------------------------
 # /approve command
 # ------------------------------------------------------------------
 
@@ -281,23 +259,6 @@ class TestApproveCommand:
         runner = _make_runner()
         result = await runner._handle_approve_command(_make_event("/approve"))
         assert "No pending command" in result
-
-    @pytest.mark.asyncio
-    async def test_text_quick_reply_label_resolves_session_scope(self):
-        """Eko quick-reply labels are ordinary text, not slash commands."""
-        from tools.approval import _ApprovalEntry, _gateway_queues
-
-        runner = _make_runner()
-        source = _make_source()
-        session_key = runner._session_key_for_source(source)
-
-        entry = _ApprovalEntry({"command": "test"})
-        _gateway_queues[session_key] = [entry]
-
-        result = await runner._handle_message(_make_event("Approve Session"))
-
-        assert "session" in result.lower()
-        assert entry.result == "session"
 
     @pytest.mark.asyncio
     async def test_approve_stale_old_style_pending(self):

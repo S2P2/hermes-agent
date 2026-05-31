@@ -663,7 +663,7 @@ class TestExecApprovalQuickReplies:
 
         assert result.success
         adapter._client.reply_quick_reply.assert_called_once()
-        args = adapter._client.reply_quick_reply.call_args.args
+        args, kwargs = adapter._client.reply_quick_reply.call_args
         assert args[0] == "tok_abc"
         assert "rm -rf /tmp/example" in args[1]
         assert "test approval" in args[1]
@@ -672,6 +672,12 @@ class TestExecApprovalQuickReplies:
             "Approve Session",
             "Approve Always",
             "Deny",
+        ]
+        assert kwargs["values"] == [
+            "/approve",
+            "/approve session",
+            "/approve always",
+            "/deny",
         ]
         assert "chat1" not in adapter._reply_tokens
 
@@ -712,6 +718,7 @@ class TestSlashConfirmQuickReplies:
             "tok_abc",
             "Confirm /new?",
             ["Approve Once", "Always Approve", "Cancel"],
+            values=["/approve", "/always", "/cancel"],
         )
         assert "chat1" not in adapter._reply_tokens
 
@@ -1182,7 +1189,9 @@ class TestEkoClientOutboundMedia:
         client = _make_eko_client()
 
         with patch.dict("sys.modules", {"aiohttp": mock_aiohttp}):
-            await client.reply_quick_reply("reply_tok", "Pick one?", ["A", "B"])
+            await client.reply_quick_reply(
+                "reply_tok", "Pick one?", ["A", "B"], values=["/a", "/b"],
+            )
 
         mock_session = mock_aiohttp.ClientSession.return_value
         mock_session.post.assert_called_once()
@@ -1193,8 +1202,8 @@ class TestEkoClientOutboundMedia:
         assert payload["message"]["data"] == "Pick one?"
         items = payload["message"]["meta"]["quickreply"]["items"]
         assert items == [
-            {"data": {"text": "A"}, "type": "label", "value": "A"},
-            {"data": {"text": "B"}, "type": "label", "value": "B"},
+            {"data": {"text": "A"}, "type": "label", "value": "/a"},
+            {"data": {"text": "B"}, "type": "label", "value": "/b"},
         ]
 
     @pytest.mark.asyncio
