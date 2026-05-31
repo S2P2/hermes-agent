@@ -30,6 +30,15 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 - A publicly reachable HTTPS URL for the webhook (e.g. via ngrok, caddy, or reverse proxy)
 - `aiohttp` Python package
 
+## Reference
+
+Local snapshots of the stable Eko docs used by this platform:
+
+- `references/eko-api.md` — Messaging API
+- `references/eko-openid.md` — OpenID / SSO
+- `references/eko-workflow-api.md` — Workflow API
+- `references/eko-user-api.md` — User API
+
 ## Setup
 
 ### 1. Create a bot in Eko Admin Panel
