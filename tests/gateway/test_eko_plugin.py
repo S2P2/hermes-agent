@@ -180,6 +180,7 @@ class TestSendRouting:
         adapter._session_routing = overrides.get("_session_routing", {})
         adapter._client = overrides.get("_client", MagicMock())
         adapter.message_max_chars = overrides.get("message_max_chars", 50_000)
+        adapter.format_mode = overrides.get("format_mode", "strip")
         adapter.truncate_message = BasePlatformAdapter.truncate_message
         return adapter
 
@@ -2139,77 +2140,132 @@ class TestEkoQueryUsersTool:
 # ---------------------------------------------------------------------------
 
 class TestFormatMessage:
+    """Tests for the default 'strip' format mode."""
+
+    @staticmethod
+    def _make_adapter(mode="strip"):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.format_mode = mode
+        return adapter
 
     def test_strips_bold(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("hello **world** end") == "hello world end"
+        assert self._make_adapter().format_message("hello **world** end") == "hello world end"
 
     def test_strips_italic(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("hello *world* end") == "hello world end"
+        assert self._make_adapter().format_message("hello *world* end") == "hello world end"
 
     def test_strips_headings(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("# Title\n## Sub\nbody") == "Title\nSub\nbody"
+        assert self._make_adapter().format_message("# Title\n## Sub\nbody") == "Title\nSub\nbody"
 
     def test_keeps_code_fences(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("```python\nprint('hi')\n```") == "```python\nprint('hi')\n```"
+        assert self._make_adapter().format_message("```python\nprint('hi')\n```") == "```python\nprint('hi')\n```"
 
     def test_keeps_inline_code(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("run `pip install` now") == "run `pip install` now"
+        assert self._make_adapter().format_message("run `pip install` now") == "run `pip install` now"
 
     def test_converts_markdown_links(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        result = adapter.format_message("click [here](https://example.com)")
+        result = self._make_adapter().format_message("click [here](https://example.com)")
         assert result == "click here (https://example.com)"
 
     def test_preserves_bare_urls(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("see https://example.com ok") == "see https://example.com ok"
+        assert self._make_adapter().format_message("see https://example.com ok") == "see https://example.com ok"
 
     def test_strips_bullet_markers(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        result = adapter.format_message("- item1\n- item2")
+        result = self._make_adapter().format_message("- item1\n- item2")
         assert result == "\u2022 item1\n\u2022 item2"
 
     def test_preserves_bullet_indent(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        result = adapter.format_message("- item1\n  - nested\n    - deeper")
+        result = self._make_adapter().format_message("- item1\n  - nested\n    - deeper")
         assert result == "\u2022 item1\n  \u2022 nested\n    \u2022 deeper"
 
     def test_empty_string(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("") == ""
+        assert self._make_adapter().format_message("") == ""
 
     def test_plain_text_unchanged(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("plain text here") == "plain text here"
+        assert self._make_adapter().format_message("plain text here") == "plain text here"
 
     def test_strips_table_separator_keeps_data_rows(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
         md = "| a | b |\n|---|---|\n| 1 | 2 |"
-        result = adapter.format_message(md)
+        result = self._make_adapter().format_message(md)
         assert "| a | b |" in result
         assert "| 1 | 2 |" in result
         assert "|---" not in result
 
     def test_preserves_single_line_blockquote(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("> some quote") == "> some quote"
+        assert self._make_adapter().format_message("> some quote") == "> some quote"
 
     def test_normalizes_multiline_blockquote(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
         md = ">>> \nline one\nline two"
-        result = adapter.format_message(md)
+        result = self._make_adapter().format_message(md)
         assert result == "> line one\n> line two"
 
     def test_multiline_blockquote_ends_at_blank_line(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
         md = ">>> \nquoted text\n\nafter quote"
-        result = adapter.format_message(md)
+        result = self._make_adapter().format_message(md)
         assert "> quoted text" in result
         assert "after quote" in result
         assert result.index("> quoted text") < result.index("after quote")
+
+
+class TestFormatModeRaw:
+    """Raw mode: pass through everything unchanged."""
+
+    @staticmethod
+    def _make_adapter():
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.format_mode = "raw"
+        return adapter
+
+    def test_bold_unchanged(self):
+        assert self._make_adapter().format_message("**bold**") == "**bold**"
+
+    def test_code_fences_unchanged(self):
+        assert self._make_adapter().format_message("```\ncode\n```") == "```\ncode\n```"
+
+    def test_table_unchanged(self):
+        md = "| a | b |\n|---|---|\n| 1 | 2 |"
+        assert self._make_adapter().format_message(md) == md
+
+    def test_blockquote_unchanged(self):
+        assert self._make_adapter().format_message("> quote") == "> quote"
+
+
+class TestFormatModePlain:
+    """Plain mode: strip everything to bare text."""
+
+    @staticmethod
+    def _make_adapter():
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter.format_mode = "plain"
+        return adapter
+
+    def test_strips_bold(self):
+        assert self._make_adapter().format_message("**bold**") == "bold"
+
+    def test_strips_italic(self):
+        assert self._make_adapter().format_message("*italic*") == "italic"
+
+    def test_strips_code_fences(self):
+        assert self._make_adapter().format_message("```python\nprint('hi')\n```") == "print('hi')"
+
+    def test_strips_inline_code(self):
+        assert self._make_adapter().format_message("run `pip install` now") == "run pip install now"
+
+    def test_strips_blockquote(self):
+        assert self._make_adapter().format_message("> some quote") == "some quote"
+
+    def test_strips_table_pipes(self):
+        result = self._make_adapter().format_message("| a | b |\n|---|---|\n| 1 | 2 |")
+        assert "|" not in result
+        assert "a" in result and "b" in result
+        assert "1" in result and "2" in result
+
+    def test_strips_headings(self):
+        assert self._make_adapter().format_message("# Title") == "Title"
+
+    def test_converts_markdown_links(self):
+        assert self._make_adapter().format_message("[click](https://x.com)") == "click (https://x.com)"
+
+    def test_preserves_bare_urls(self):
+        assert self._make_adapter().format_message("see https://x.com") == "see https://x.com"
 

@@ -129,6 +129,23 @@ Open Eko, create a 1:1 chat with the bot, and send a message.
 | `EKO_HOME_CHANNEL` | No | (empty) | Default user ID for cron delivery |
 | `EKO_REPLY_TOKEN_TTL` | No | `50` | Reply-token TTL in seconds |
 | `EKO_MESSAGE_MAX_CHARS` | No | `5000` | Max chars per outbound message (chunks longer text) |
+| `EKO_FORMAT_MODE` | No | `strip` | Outbound formatting: `raw`, `strip`, or `plain` (see below) |
+
+## Outbound Formatting
+
+Eko renders **plain text only** — bold, italic, headings, and other Markdown
+constructs appear as literal characters. Bare URLs are auto-linked by the client.
+
+The `EKO_FORMAT_MODE` env var (or `format_mode` in config.yaml `extra`) controls
+how outbound messages are processed:
+
+| Mode | Bold / Italic / Headings | Code fences / Inline code | Blockquotes | Tables | Links |
+|------|--------------------------|---------------------------|-------------|--------|-------|
+| `strip` (default) | Stripped | **Kept** (visually meaningful) | **Kept** (`>` prefix preserved) | Data rows kept, separator rows stripped | Converted to `label (url)` |
+| `raw` | Unchanged | Unchanged | Unchanged | Unchanged | Unchanged |
+| `plain` | Stripped | Stripped | Stripped | Pipes stripped, content kept | Converted to `label (url)` |
+
+All modes preserve bare URLs (they are auto-linked by Eko).
 
 ## Agent Tools
 

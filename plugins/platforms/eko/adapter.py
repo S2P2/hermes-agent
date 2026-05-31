@@ -65,6 +65,10 @@ _MD_HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _MD_BULLET_RE = re.compile(r"^(\s*)[-*+]\s+", re.MULTILINE)
 _MD_TABLE_SEP_RE = re.compile(r"^\|[\s|:?-]+\|$", re.MULTILINE)
 _MD_MULTILINE_QUOTE_RE = re.compile(r"^>>>\s*\n", re.MULTILINE)
+_MD_BLOCKQUOTE_RE = re.compile(r"^\s*>\s?", re.MULTILINE)
+_MD_TABLE_PIPE_RE = re.compile(r"^\|(.+)\|$", re.MULTILINE)
+_MD_CODE_BLOCK_RE = re.compile(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", re.DOTALL)
+_MD_CODE_INLINE_RE = re.compile(r"`([^`]+)`")
 
 
 def strip_markdown(text: str) -> str:
@@ -114,6 +118,32 @@ def strip_markdown(text: str) -> str:
     text = _MD_ITAL_RE.sub(r"\1", text)
     text = _MD_HEADING_RE.sub("", text)
     # Preserve indentation in bullets (group 1 = leading whitespace).
+    text = _MD_BULLET_RE.sub(lambda m: m.group(1) + "\u2022 ", text)
+    return text
+
+
+def strip_markdown_plain(text: str) -> str:
+    """Strip ALL Markdown to plain text — nothing is preserved.
+
+    Strips everything: bold, italic, headings, code fences, inline
+    code, blockquotes, table pipes, and markdown links.  Bare URLs
+    are kept since they remain functional.
+    """
+    if not text:
+        return text
+
+    def _unfence(m: re.Match) -> str:
+        return m.group(1).rstrip("\n")
+    text = _MD_CODE_BLOCK_RE.sub(_unfence, text)
+    text = _MD_CODE_INLINE_RE.sub(r"\1", text)
+    text = _MD_BLOCKQUOTE_RE.sub("", text)
+    # Strip all table pipes but keep cell content.
+    text = _MD_TABLE_PIPE_RE.sub(lambda m: m.group(1).replace(" | ", "  ").replace("|", " "), text)
+    text = _MD_TABLE_SEP_RE.sub("", text)
+    text = _MD_LINK_RE.sub(lambda m: f"{m.group(1)} ({m.group(2)})", text)
+    text = _MD_BOLD_RE.sub(r"\1", text)
+    text = _MD_ITAL_RE.sub(r"\1", text)
+    text = _MD_HEADING_RE.sub("", text)
     text = _MD_BULLET_RE.sub(lambda m: m.group(1) + "\u2022 ", text)
     return text
 
@@ -697,6 +727,13 @@ class EkoAdapter(BasePlatformAdapter):
             )
         except (TypeError, ValueError):
             self.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
+
+        # Format mode: raw | strip (default) | plain
+        self.format_mode = (
+            os.getenv("EKO_FORMAT_MODE") or extra.get("format_mode", "strip")
+        ).strip().lower()
+        if self.format_mode not in ("raw", "strip", "plain"):
+            self.format_mode = "strip"
 
         # Runtime state
         self._client: Optional[_EkoClient] = None
@@ -1364,7 +1401,20 @@ class EkoAdapter(BasePlatformAdapter):
         return {"name": chat_id or "", "type": "dm"}
 
     def format_message(self, content: str) -> str:
-        """Strip Markdown — Eko renders plain text only with auto-linked bare URLs."""
+        """Format outbound text based on the configured format_mode.
+
+        Modes:
+          raw   – pass through unchanged.
+          strip – remove markdown that Eko renders as literal characters,
+                  but keep code fences, blockquote prefixes, and table
+                  data rows.  (default)
+          plain – strip everything including code fences, inline code,
+                  blockquotes, and table pipes.
+        """
+        if getattr(self, "format_mode", "strip") == "raw":
+            return content
+        if getattr(self, "format_mode", "strip") == "plain":
+            return strip_markdown_plain(content)
         return strip_markdown(content)
 
 

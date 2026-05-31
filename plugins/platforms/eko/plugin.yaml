@@ -51,3 +51,7 @@ optional_env:
     description: "Reply-token TTL in seconds (default: 50)"
     prompt: "Reply token TTL (seconds)"
     password: false
+  - name: EKO_FORMAT_MODE
+    description: "Outbound formatting mode: raw (no processing), strip (remove markdown literals, default), plain (strip everything)"
+    prompt: "Format mode (raw/strip/plain)"
+    password: false
