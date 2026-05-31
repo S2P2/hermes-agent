@@ -36,10 +36,11 @@ logger = logging.getLogger(__name__)
 class ResolvedRoute:
     """One resolved target for an outbound send."""
 
-    mode: str  # "dm" | "group" | "explicit"
+    mode: str  # "dm" | "group" | "explicit" | "error"
     uid: Optional[str] = None
     group_id: Optional[str] = None
     topic_id: Optional[str] = None
+    error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ class OutboundSender:
         explicit = _parse_explicit_routing(chat_id)
         if explicit is not None:
             if "error" in explicit:
-                return ResolvedRoute(mode="dm", uid=chat_id)
+                return ResolvedRoute(mode="error", error=explicit["error"])
             return ResolvedRoute(
                 mode="explicit",
                 group_id=explicit["groupId"],
@@ -138,17 +139,16 @@ class OutboundSender:
         """Send a text message, preferring reply token then push."""
         route = self.resolve_route(chat_id)
 
-        # Try reply token first (only for DM / non-group)
-        if not self._is_group(route):
-            token, used_reply = self._consume_reply_token(chat_id)
-            if used_reply:
-                try:
-                    await self._client.reply_text(token, content)
-                    return SendResult(success=True, message_id=token)
-                except Exception as exc:
-                    logger.debug("Eko: reply_text failed, falling back to push: %s", exc)
+        # Try reply token first for ALL route types (DM, group, explicit).
+        token, used_reply = self._consume_reply_token(chat_id)
+        if used_reply:
+            try:
+                await self._client.reply_text(token, content)
+                return SendResult(success=True, message_id=token)
+            except Exception as exc:
+                logger.debug("Eko: reply_text failed, falling back to push: %s", exc)
 
-        # Push
+        # Push fallback
         if self._is_group(route):
             await self._client.push_group_text(
                 route.group_id, route.topic_id, content
@@ -167,25 +167,34 @@ class OutboundSender:
         """Send an image, preferring reply_picture then push."""
         route = self.resolve_route(chat_id)
 
-        # Try reply_picture for DM
-        if not self._is_group(route):
-            token, used_reply = self._consume_reply_token(chat_id)
-            if used_reply:
-                try:
-                    await self._client.reply_picture(token, file_bytes, filename)
-                    return SendResult(success=True, message_id=token)
-                except Exception as exc:
-                    logger.debug("Eko: reply_picture failed, falling back to push: %s", exc)
+        # Try reply_picture for ALL route types (DM, group, explicit).
+        token, used_reply = self._consume_reply_token(chat_id)
+        if used_reply:
+            try:
+                await self._client.reply_picture(token, file_bytes, filename)
+                return SendResult(success=True, message_id=token)
+            except Exception as exc:
+                logger.debug("Eko: reply_picture failed, falling back to push: %s", exc)
 
-        # Push
+        # Push fallback
         if self._is_group(route):
-            await self._client.push_group_picture(
-                route.group_id, route.topic_id, file_bytes, filename, caption
-            )
+            if caption:
+                await self._client.push_group_picture(
+                    route.group_id, route.topic_id, file_bytes, filename, caption
+                )
+            else:
+                await self._client.push_group_picture(
+                    route.group_id, route.topic_id, file_bytes, filename
+                )
         else:
-            await self._client.push_picture(
-                route.uid, file_bytes, filename, caption=caption
-            )
+            if caption:
+                await self._client.push_picture(
+                    route.uid, file_bytes, filename, caption=caption
+                )
+            else:
+                await self._client.push_picture(
+                    route.uid, file_bytes, filename
+                )
         return SendResult(success=True)
 
     async def send_file(

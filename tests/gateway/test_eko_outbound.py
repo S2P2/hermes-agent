@@ -88,13 +88,13 @@ def test_explicit_standalone_route():
 
 
 def test_explicit_standalone_malformed():
-    """Malformed explicit routing falls back to DM."""
+    """Malformed explicit routing returns error mode."""
     sender = _make_sender()
 
     route = sender.resolve_route("group:only-one-part")
 
-    assert route.mode == "dm"
-    assert route.uid == "group:only-one-part"
+    assert route.mode == "error"
+    assert route.error is not None
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ async def test_image_dm_reply_then_push():
     # Second send — push_picture
     result2 = await sender.send_image("u1", b"\x89PNG2", "img2.png")
     assert result2.success is True
-    client.push_picture.assert_called_once_with("u1", b"\x89PNG2", "img2.png", caption="")
+    client.push_picture.assert_called_once_with("u1", b"\x89PNG2", "img2.png")
 
 
 # ---------------------------------------------------------------------------
@@ -319,3 +319,68 @@ def test_standalone_explicit_routing():
     assert route.mode == "explicit"
     assert route.group_id == "g1"
     assert route.topic_id == "t1"
+
+
+# ---------------------------------------------------------------------------
+# Regression: group/topic routes must also use reply tokens
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_text_group_uses_reply_token_first():
+    """Group route with reply token: reply_text first, push_group_text fallback."""
+    client = MagicMock()
+    client.reply_text = AsyncMock()
+    client.push_group_text = AsyncMock()
+
+    now = time.time()
+    sender = _make_sender(
+        session_routing={
+            "g1_t1": {
+                "uid": "u1",
+                "groupId": "g1",
+                "topicId": "t1",
+                "groupType": "group",
+            }
+        },
+        reply_tokens={"g1_t1": ("tok-grp", now + 60)},
+    )
+    sender._client = client
+
+    # First send — should consume reply token even for group route
+    result = await sender.send_text("g1_t1", "hello group")
+    assert result.success is True
+    client.reply_text.assert_called_once_with("tok-grp", "hello group")
+    assert "g1_t1" not in sender._reply_tokens  # consumed
+
+    # Second send — no token, push_group_text
+    result2 = await sender.send_text("g1_t1", "second msg")
+    assert result2.success is True
+    client.push_group_text.assert_called_once_with("g1", "t1", "second msg")
+
+
+@pytest.mark.asyncio
+async def test_image_group_uses_reply_token_first():
+    """Group route with reply token: reply_picture first, push_group_picture fallback."""
+    client = MagicMock()
+    client.reply_picture = AsyncMock()
+    client.push_group_picture = AsyncMock()
+
+    now = time.time()
+    sender = _make_sender(
+        session_routing={
+            "g1_t1": {
+                "uid": "u1",
+                "groupId": "g1",
+                "topicId": "t1",
+                "groupType": "group",
+            }
+        },
+        reply_tokens={"g1_t1": ("tok-grp", now + 60)},
+    )
+    sender._client = client
+
+    result = await sender.send_image("g1_t1", b"\x89PNG", "img.png", caption="hi")
+    assert result.success is True
+    client.reply_picture.assert_called_once_with("tok-grp", b"\x89PNG", "img.png")
+    assert "g1_t1" not in sender._reply_tokens

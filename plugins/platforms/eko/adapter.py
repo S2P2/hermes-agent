@@ -997,10 +997,7 @@ async def _standalone_send(
     or documents (detected by extension).  ``force_document`` sends all files
     as documents regardless of extension.
 
-    Supports group/topic routing: when the live gateway adapter is available,
-    resolves ``chat_id`` through its ``_session_routing`` dict to determine
-    DM vs group endpoints.  Falls back to DM endpoints when no routing
-    metadata is available.
+    Route resolution is delegated to OutboundSender.resolve_route().
     """
     extra = getattr(pconfig, "extra", {}) or {}
     base_url = os.getenv("EKO_BASE_URL") or extra.get("base_url", "")
@@ -1011,38 +1008,39 @@ async def _standalone_send(
 
     client = _EkoClient(base_url, client_id, client_secret)
 
-    # Resolve group/topic routing.
-    # 1. Explicit routing format (group:<gid>:topic:<tid>) — works without gateway.
-    # 2. Live adapter routing — requires running gateway.
-    routing: Optional[Dict[str, str]] = None
-    is_group = False
-    explicit = _parse_explicit_routing(chat_id)
-    if explicit is not None:
-        if "error" in explicit:
-            return {"error": explicit["error"]}
-        routing = explicit
-        is_group = True
-    else:
+    # Build session_routing from live adapter if available, for resolve_route().
+    session_routing: Dict[str, Dict[str, str]] = {}
+    # Skip live adapter lookup if explicit routing will handle it.
+    needs_live = not chat_id.startswith("group:")
+    if needs_live:
         try:
             from gateway.run import _gateway_runner_ref
             from gateway.config import Platform as _Platform
             _runner = _gateway_runner_ref()
             if _runner:
                 _adapter = _runner.adapters.get(_Platform("eko"))
-                if _adapter and hasattr(_adapter, "_get_routing"):
-                    routing = _adapter._get_routing(chat_id)
-                    if routing and routing.get("groupId") and routing.get("topicId"):
-                        is_group = True
+                if _adapter:
+                    routing = _adapter._get_routing(chat_id) if hasattr(_adapter, "_get_routing") else None
+                    if routing:
+                        session_routing[chat_id] = routing
         except Exception:
             pass
+
+    cfg = EkoConfig.from_env(extra)
+    sender = OutboundSender(
+        config=cfg,
+        client=client,
+        session_routing=session_routing,
+        reply_tokens={},  # standalone: no reply tokens
+    )
+    route = sender.resolve_route(chat_id)
+    if route.error:
+        return {"error": route.error}
 
     # Send text body.
     if message:
         try:
-            if is_group and routing:
-                await client.push_group_text(routing["groupId"], routing["topicId"], message)
-            else:
-                await client.push_text(chat_id, message)
+            await sender.send_text(chat_id, message)
         except Exception as exc:
             return {"error": str(exc)}
 
@@ -1050,23 +1048,14 @@ async def _standalone_send(
     _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     media_warnings: List[str] = []
 
-    # Resolve upload size limit from env/config.
-    try:
-        max_upload = int(
-            os.getenv("EKO_MAX_UPLOAD_BYTES")
-            or extra.get("max_upload_bytes", DEFAULT_MAX_UPLOAD_BYTES)
-        )
-    except (TypeError, ValueError):
-        max_upload = DEFAULT_MAX_UPLOAD_BYTES
-
     for media_path in media_files or []:
         try:
             from pathlib import Path
             p = Path(media_path)
             file_size = p.stat().st_size
-            if max_upload and file_size > max_upload:
+            if not sender.check_size(file_size):
                 media_warnings.append(
-                    f"File too large: {p.name} ({file_size} bytes, limit {max_upload})"
+                    f"File too large: {p.name} ({file_size} bytes, limit {cfg.max_upload_bytes})"
                 )
                 continue
             file_bytes = p.read_bytes()
@@ -1078,15 +1067,9 @@ async def _standalone_send(
 
         try:
             if not force_document and ext in _IMAGE_EXTS:
-                if is_group and routing:
-                    await client.push_group_picture(routing["groupId"], routing["topicId"], file_bytes, filename)
-                else:
-                    await client.push_picture(chat_id, file_bytes, filename)
+                await sender.send_image(chat_id, file_bytes, filename)
             else:
-                if is_group and routing:
-                    await client.push_group_file(routing["groupId"], routing["topicId"], file_bytes, filename)
-                else:
-                    await client.push_file(chat_id, file_bytes, filename)
+                await sender.send_file(chat_id, file_bytes, filename)
         except Exception as exc:
             media_warnings.append(f"Failed to send {filename}: {exc}")
 
