@@ -235,6 +235,16 @@ class TestSendRouting:
         adapter._client.push_text.assert_called_once_with("chat1", "hello")
 
     @pytest.mark.asyncio
+    async def test_send_strips_markdown(self):
+        adapter = self._make_routing_adapter(
+            _client=MagicMock(push_text=AsyncMock()),
+        )
+
+        result = await adapter.send("chat1", "**bold** and *italic*")
+        assert result.success
+        adapter._client.push_text.assert_called_once_with("chat1", "bold and italic")
+
+    @pytest.mark.asyncio
     async def test_push_auth_error_retries(self):
         adapter = self._make_routing_adapter(
             _client=MagicMock(
@@ -2122,4 +2132,53 @@ class TestEkoQueryUsersTool:
             result = json.loads(await _handle_query_users({"username": "a"}))
         assert "error" in result
         assert "timeout" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# FormatMessage — Eko renders plain text only, auto-links bare URLs
+# ---------------------------------------------------------------------------
+
+class TestFormatMessage:
+
+    def test_strips_bold(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("hello **world** end") == "hello world end"
+
+    def test_strips_italic(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("hello *world* end") == "hello world end"
+
+    def test_strips_headings(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("# Title\n## Sub\nbody") == "Title\nSub\nbody"
+
+    def test_strips_code_fences_keeps_content(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("```python\nprint('hi')\n```") == "print('hi')"
+
+    def test_strips_inline_code(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("run `pip install` now") == "run pip install now"
+
+    def test_converts_markdown_links(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        result = adapter.format_message("click [here](https://example.com)")
+        assert result == "click here (https://example.com)"
+
+    def test_preserves_bare_urls(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("see https://example.com ok") == "see https://example.com ok"
+
+    def test_strips_bullet_markers(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        result = adapter.format_message("- item1\n- item2\n- nested")
+        assert result == "\u2022 item1\n\u2022 item2\n\u2022 nested"
+
+    def test_empty_string(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("") == ""
+
+    def test_plain_text_unchanged(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("plain text here") == "plain text here"
 

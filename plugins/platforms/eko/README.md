@@ -300,7 +300,7 @@ to `/bot/v1/direct/*`.
 | Management actions config gate | `eko.management_actions` allowlist to control which tools are available | Issue #23 |
 | Connection pooling | Reuse `aiohttp.ClientSession` across requests | Current pattern creates one per request (matches LINE adapter) |
 | Typing indicator | Show agent-is-working feedback | Eko may not have a typing API — needs investigation |
-| Markdown formatting | Test if Eko renders any formatting, adjust `format_message()` | Currently passes text through as-is |
+| Markdown formatting | ~~Test if Eko renders any formatting~~ **Done — plain text only.** `format_message()` strips Markdown. | Bare URLs auto-linked by client |
 
 ## Design Decisions
 

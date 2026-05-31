@@ -33,6 +33,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -55,6 +56,40 @@ DEFAULT_WEBHOOK_PATH = "/eko/webhook"
 DEFAULT_REPLY_TOKEN_TTL = 50  # conservative below Eko's estimated ~60 s
 WEBHOOK_BODY_MAX_BYTES = 1_048_576  # 1 MiB
 DEFAULT_MESSAGE_MAX_CHARS = 5000  # conservative until Eko limit confirmed
+
+# Markdown stripping patterns — Eko renders plain text only.
+_MD_CODE_BLOCK_RE = re.compile(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", re.DOTALL)
+_MD_CODE_INLINE_RE = re.compile(r"`([^`]+)`")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_MD_ITAL_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+_MD_BULLET_RE = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)
+
+
+def strip_markdown(text: str) -> str:
+    """Strip Markdown that Eko can't render. URLs are preserved.
+
+    Eko's text rendering is plain text only — bold, italics, code
+    fences, headings, and bullet markers all render as literal
+    characters.  Bare URLs are auto-linked by the client, but
+    ``[label](url)`` syntax is not.  This converts ``[label](url)``
+    to ``label (url)`` so the URL remains tappable, then strips
+    the rest.
+    """
+    if not text:
+        return text
+
+    def _unfence(m: re.Match) -> str:
+        return m.group(1).rstrip("\n")
+    text = _MD_CODE_BLOCK_RE.sub(_unfence, text)
+    text = _MD_CODE_INLINE_RE.sub(r"\1", text)
+    text = _MD_LINK_RE.sub(lambda m: f"{m.group(1)} ({m.group(2)})", text)
+    text = _MD_BOLD_RE.sub(r"\1", text)
+    text = _MD_ITAL_RE.sub(r"\1", text)
+    text = _MD_HEADING_RE.sub("", text)
+    text = _MD_BULLET_RE.sub("\u2022 ", text)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +1016,9 @@ class EkoAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Eko adapter not connected")
 
+        # Strip Markdown — Eko renders plain text only.
+        content = self.format_message(content)
+
         chunks = self.truncate_message(content, self.message_max_chars)
         if not chunks:
             return SendResult(success=True)
@@ -1300,7 +1338,8 @@ class EkoAdapter(BasePlatformAdapter):
         return {"name": chat_id or "", "type": "dm"}
 
     def format_message(self, content: str) -> str:
-        return content
+        """Strip Markdown — Eko renders plain text only with auto-linked bare URLs."""
+        return strip_markdown(content)
 
 
 # ---------------------------------------------------------------------------
@@ -1525,8 +1564,12 @@ def register(ctx) -> None:
         allow_update_command=True,
         platform_hint=(
             "You are chatting via Eko Messaging API. "
+            "Eko renders plain text only — bold, italic, code fences, and headings "
+            "all appear as literal characters. "
+            "Bare URLs are auto-linked; use https://example.com instead of "
+            "[label](url). "
             "You can send images and files to the user using the send_message tool "
             "with MEDIA:<local_path> in the message. "
-            "Keep responses concise and well-structured."
+            "Keep responses concise."
         ),
     )
