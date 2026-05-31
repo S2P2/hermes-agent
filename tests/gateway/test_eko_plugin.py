@@ -2351,6 +2351,84 @@ class TestEkoCreateGroupTool:
         assert "server error" in result["error"]
 
 
+# ---------------------------------------------------------------------------
+# 21b. Eko create_group username resolution (Issue #27)
+# ---------------------------------------------------------------------------
+
+
+class TestEkoCreateGroupUsernameResolution:
+    """Tests for exact-match + ambiguity-safe username resolution in create_group."""
+
+    @pytest.mark.asyncio
+    async def test_exact_match_resolves(self):
+        """Exact username match resolves when multiple fuzzy results returned."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u_alice", "username": "alice"},
+            {"_id": "u_alice2", "username": "alice123"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert result.get("_id") == "grp_new"
+        client.create_group.assert_called_once_with(["u_alice"], name="")
+
+    @pytest.mark.asyncio
+    async def test_no_exact_match_returns_error_with_candidates(self):
+        """When only fuzzy matches exist, return error listing candidates."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u1", "username": "alice123"},
+            {"_id": "u2", "username": "alice_smith"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        assert "alice" in result["error"]
+        client.create_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multiple_exact_matches_returns_ambiguity_error(self):
+        """Multiple users with the exact same username → ambiguity error."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u1", "username": "alice"},
+            {"_id": "u2", "username": "alice"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        assert "ambiguous" in result["error"].lower()
+        client.create_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_user_id_returns_error(self):
+        """User with missing/empty _id should fail, not silently pass empty string."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "", "username": "alice"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        client.create_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dict_return_from_query_users_no_crash(self):
+        """If query_users returns a dict instead of list, no KeyError."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value={"_id": "u1", "username": "alice"})
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        client.create_group.assert_not_called()
+
+
+
 class TestEkoCreateTopicTool:
 
     @pytest.mark.asyncio
