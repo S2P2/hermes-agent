@@ -335,6 +335,9 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 - Webhook signature verification via `X-Eko-Signature` (HMAC-SHA256-Base64)
 - Image receiving: download inbound pictures, cache locally, vision tool integration
 - Image sending: native multipart upload with reply token + push fallback
+- Selectable prompts: clarify choices, slash confirmations, and dangerous
+  command approvals use Eko quick replies via `/bot/v1/message/quickreply`
+  when a reply token is available, with text fallback otherwise
 - File sending: push files to users via multipart upload
 - Sticker webhook events: surface `[sticker]` placeholder
 
@@ -358,7 +361,6 @@ None currently.
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Quick reply buttons | Tap-to-respond options for users | Eko supports it via `/bot/v1/message/quickreply` |
 | Compact tool progress | One-shot progress message on no-edit platforms | Issue #32 (pended — core gateway change) |
 
 ### Low priority

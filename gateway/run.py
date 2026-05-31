@@ -7165,6 +7165,14 @@ class GatewayRunner:
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
 
+        if _tool_approval_live:
+            _approval_command = self._approval_command_for_text_reply(event.text)
+            if _approval_command:
+                _approval_event = dataclasses.replace(event, text=_approval_command)
+                if _approval_command.startswith("/approve"):
+                    return await self._handle_approve_command(_approval_event)
+                return await self._handle_deny_command(_approval_event)
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -14112,6 +14120,22 @@ class GatewayRunner:
     # ------------------------------------------------------------------
 
     _APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
+
+    @staticmethod
+    def _approval_command_for_text_reply(text: str) -> Optional[str]:
+        """Map button-like text replies to approval slash commands.
+
+        Some platforms (Eko quick replies) deliver taps as ordinary text, not
+        callbacks.  Only exact labels are accepted, and callers should only use
+        this while a dangerous-command approval is actually pending.
+        """
+        normalized = " ".join((text or "").strip().lower().split())
+        return {
+            "approve once": "/approve",
+            "approve session": "/approve session",
+            "approve always": "/approve always",
+            "deny": "/deny",
+        }.get(normalized)
 
     async def _handle_approve_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /approve command — unblock waiting agent thread(s).

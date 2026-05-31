@@ -671,6 +671,150 @@ class EkoAdapter(BasePlatformAdapter):
     # Outbound send (text)
     # ------------------------------------------------------------------
 
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Render dangerous-command approval as Eko quick replies.
+
+        Eko quick replies are reply-token only.  If no fresh token is
+        available, return unsupported so the gateway sends its text fallback.
+        Quick-reply taps arrive as ordinary text; gateway text handling maps
+        these labels to the same approval actions as typed slash commands.
+        """
+        if not self._client:
+            return SendResult(success=False, error="Eko adapter not connected")
+
+        token, used_reply = self._consume_reply_token(chat_id)
+        if not used_reply:
+            return SendResult(success=False, error="No Eko reply token available")
+
+        cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
+        prompt = (
+            "⚠️ Command Approval Required\n\n"
+            f"```{cmd_preview}```\n\n"
+            f"Reason: {description}"
+        )
+
+        try:
+            await self._client.reply_quick_reply(
+                token,
+                prompt,
+                ["Approve Once", "Approve Session", "Approve Always", "Deny"],
+            )
+        except Exception as exc:
+            logger.debug(
+                "Eko: exec-approval quick reply failed, falling back to text prompt: %s",
+                exc,
+            )
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+        return SendResult(success=True, message_id=token)
+
+    async def send_slash_confirm(
+        self,
+        chat_id: str,
+        title: str,
+        message: str,
+        session_key: str,
+        confirm_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Render slash confirmations as Eko quick replies when possible.
+
+        Eko quick replies are reply-token only.  If no fresh token is
+        available, return unsupported so the gateway sends its text fallback.
+        Quick-reply taps arrive as ordinary text; the gateway already maps
+        "Approve Once" / "Always Approve" / "Cancel" to confirm choices.
+        """
+        if not self._client:
+            return SendResult(success=False, error="Eko adapter not connected")
+
+        token, used_reply = self._consume_reply_token(chat_id)
+        if not used_reply:
+            return SendResult(success=False, error="No Eko reply token available")
+
+        try:
+            await self._client.reply_quick_reply(
+                token,
+                message,
+                ["Approve Once", "Always Approve", "Cancel"],
+            )
+        except Exception as exc:
+            logger.debug(
+                "Eko: slash-confirm quick reply failed, falling back to text prompt: %s",
+                exc,
+            )
+            return SendResult(success=False, error=str(exc), retryable=True)
+
+        return SendResult(success=True, message_id=token)
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Render clarify choices as Eko quick replies when possible.
+
+        Eko quick replies are reply-token only.  If no fresh token is
+        available, fall back to the base numbered-text prompt.
+        """
+        if not choices or not self._client:
+            return await super().send_clarify(
+                chat_id=chat_id,
+                question=question,
+                choices=choices,
+                clarify_id=clarify_id,
+                session_key=session_key,
+                metadata=metadata,
+            )
+
+        token, used_reply = self._consume_reply_token(chat_id)
+        if not used_reply:
+            return await super().send_clarify(
+                chat_id=chat_id,
+                question=question,
+                choices=choices,
+                clarify_id=clarify_id,
+                session_key=session_key,
+                metadata=metadata,
+            )
+
+        try:
+            await self._client.reply_quick_reply(
+                token,
+                question,
+                [str(c) for c in choices],
+            )
+        except Exception as exc:
+            logger.debug(
+                "Eko: quick reply failed, falling back to text prompt: %s",
+                exc,
+            )
+            return await super().send_clarify(
+                chat_id=chat_id,
+                question=question,
+                choices=choices,
+                clarify_id=clarify_id,
+                session_key=session_key,
+                metadata=metadata,
+            )
+
+        # Eko quick-reply taps arrive back as ordinary text messages with a
+        # fresh reply token.  Mark this clarify as text-capturing so the
+        # gateway resolves it instead of starting a new agent turn.
+        from tools.clarify_gateway import mark_awaiting_text
+        mark_awaiting_text(clarify_id)
+        return SendResult(success=True, message_id=token)
+
     async def send(
         self,
         chat_id: str,
