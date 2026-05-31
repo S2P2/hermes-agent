@@ -1594,6 +1594,60 @@ class TestTopicRouting:
         assert call_args.source.chat_type == "dm"
 
     @pytest.mark.asyncio
+    async def test_group_chat_name_uses_group_id(self):
+        """Group chat_name should be the group ID, not the sender's username."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_grp",
+            "type": "message",
+            "source": {"userId": "user_abc", "username": "alice"},
+            "message": {
+                "id": "msg_grp",
+                "type": "text",
+                "groupId": "grp_1",
+                "groupType": "group",
+                "topicId": "topic_1",
+                "text": "hello group",
+            },
+            "sessionId": "grp_1_topic_1",
+        }
+
+        await adapter._handle_message_event(event)
+
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.source.chat_name == "grp_1"
+        assert call_args.source.chat_type == "group"
+        assert call_args.source.thread_id == "topic_1"
+
+    @pytest.mark.asyncio
+    async def test_dm_chat_name_uses_username(self):
+        """DM chat_name should be the sender's username, not a group ID."""
+        adapter = self._make_adapter()
+
+        event = {
+            "replyToken": "tok_dm",
+            "type": "message",
+            "source": {"userId": "user_abc", "username": "alice"},
+            "message": {
+                "id": "msg_dm",
+                "type": "text",
+                "groupId": "grp_1",
+                "groupType": "direct_chat",
+                "topicId": "topic_dm",
+                "text": "hello DM",
+            },
+            "sessionId": "grp_1_topic_dm",
+        }
+
+        await adapter._handle_message_event(event)
+
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.source.chat_name == "alice"
+        assert call_args.source.chat_type == "dm"
+        assert call_args.source.thread_id == "topic_dm"
+
+    @pytest.mark.asyncio
     async def test_topic_gets_separate_session(self):
         """A different topic in the same chat gets a different chat_id."""
         adapter = self._make_adapter()
@@ -3084,4 +3138,97 @@ class TestManagementActionsConfigGate:
         with patch("hermes_cli.config.load_config", return_value=mock_cfg):
             result = _load_management_actions_config()
         assert result == ["create_group", "query_users"]
+
+
+# ---------------------------------------------------------------------------
+# get_chat_info (#30)
+# ---------------------------------------------------------------------------
+
+
+class TestGetChatInfo:
+    """Tests for EkoAdapter.get_chat_info returning group/topic metadata."""
+
+    @staticmethod
+    def _make_adapter():
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._session_routing = {}
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_unknown_chat_id_returns_dm(self):
+        """Unknown chat_id with no routing data returns type=dm."""
+        adapter = self._make_adapter()
+        result = await adapter.get_chat_info("some_user_id")
+        assert result == {"name": "some_user_id", "type": "dm"}
+
+    @pytest.mark.asyncio
+    async def test_empty_chat_id_returns_dm(self):
+        """Empty chat_id returns sensible DM fallback."""
+        adapter = self._make_adapter()
+        result = await adapter.get_chat_info("")
+        assert result == {"name": "", "type": "dm"}
+
+    @pytest.mark.asyncio
+    async def test_topic_routing_returns_topic_type(self):
+        """Routing with groupId + topicId returns type=topic with metadata."""
+        adapter = self._make_adapter()
+        chat_id = "abc123_def456"
+        adapter._session_routing[chat_id] = {
+            "uid": "user789",
+            "groupId": "abc123",
+            "topicId": "def456",
+            "groupType": "group_chatv2",
+        }
+        result = await adapter.get_chat_info(chat_id)
+        assert result == {
+            "name": chat_id,
+            "type": "topic",
+            "group_id": "abc123",
+            "topic_id": "def456",
+            "user_id": "user789",
+            "group_type": "group_chatv2",
+        }
+
+    @pytest.mark.asyncio
+    async def test_group_routing_without_topic_returns_group_type(self):
+        """Routing with groupId but no topicId returns type=group."""
+        adapter = self._make_adapter()
+        chat_id = "group_only_session"
+        adapter._session_routing[chat_id] = {
+            "uid": "user789",
+            "groupId": "abc123",
+            "topicId": "",
+            "groupType": "group_chatv2",
+        }
+        result = await adapter.get_chat_info(chat_id)
+        assert result == {
+            "name": chat_id,
+            "type": "group",
+            "group_id": "abc123",
+            "topic_id": "",
+            "user_id": "user789",
+            "group_type": "group_chatv2",
+        }
+
+    @pytest.mark.asyncio
+    async def test_dm_routing_returns_dm(self):
+        """Routing with direct_chat groupType but no groupId returns type=dm."""
+        adapter = self._make_adapter()
+        chat_id = "dm_user"
+        adapter._session_routing[chat_id] = {
+            "uid": "user789",
+            "groupId": "",
+            "topicId": "",
+            "groupType": "direct_chat",
+        }
+        result = await adapter.get_chat_info(chat_id)
+        assert result == {"name": chat_id, "type": "dm"}
+
+    @pytest.mark.asyncio
+    async def test_empty_routing_dict_returns_dm(self):
+        """Empty _session_routing returns DM for any chat_id."""
+        adapter = self._make_adapter()
+        assert adapter._session_routing == {}
+        result = await adapter.get_chat_info("any_id")
+        assert result == {"name": "any_id", "type": "dm"}
 
