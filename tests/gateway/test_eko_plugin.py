@@ -2743,6 +2743,84 @@ class TestEkoCreateGroupTool:
         assert "server error" in result["error"]
 
 
+# ---------------------------------------------------------------------------
+# 21b. Eko create_group username resolution (Issue #27)
+# ---------------------------------------------------------------------------
+
+
+class TestEkoCreateGroupUsernameResolution:
+    """Tests for exact-match + ambiguity-safe username resolution in create_group."""
+
+    @pytest.mark.asyncio
+    async def test_exact_match_resolves(self):
+        """Exact username match resolves when multiple fuzzy results returned."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u_alice", "username": "alice"},
+            {"_id": "u_alice2", "username": "alice123"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert result.get("_id") == "grp_new"
+        client.create_group.assert_called_once_with(["u_alice"], name="")
+
+    @pytest.mark.asyncio
+    async def test_no_exact_match_returns_error_with_candidates(self):
+        """When only fuzzy matches exist, return error listing candidates."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u1", "username": "alice123"},
+            {"_id": "u2", "username": "alice_smith"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        assert "alice" in result["error"]
+        client.create_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multiple_exact_matches_returns_ambiguity_error(self):
+        """Multiple users with the exact same username → ambiguity error."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u1", "username": "alice"},
+            {"_id": "u2", "username": "alice"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        assert "ambiguous" in result["error"].lower()
+        client.create_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_user_id_returns_error(self):
+        """User with missing/empty _id should fail, not silently pass empty string."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "", "username": "alice"},
+        ])
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        client.create_group.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dict_return_from_query_users_no_crash(self):
+        """If query_users returns a dict instead of list, no KeyError."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value={"_id": "u1", "username": "alice"})
+        with _patch_eko_client(client):
+            result = json.loads(await _handle_create_group({"member_usernames": ["alice"]}))
+        assert "error" in result
+        client.create_group.assert_not_called()
+
+
+
 class TestEkoCreateTopicTool:
 
     @pytest.mark.asyncio
@@ -2835,4 +2913,175 @@ class TestEkoQueryUsersTool:
             result = json.loads(await _handle_query_users({"username": "a"}))
         assert "error" in result
         assert "timeout" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Management actions config gate
+# ---------------------------------------------------------------------------
+
+
+def _patch_management_actions(return_value):
+    """Patch _load_management_actions_config to return a fixed value."""
+    return patch(
+        "plugins.platforms.eko.tools._load_management_actions_config",
+        return_value=return_value,
+    )
+
+
+class TestManagementActionsConfigGate:
+    """Tests for eko.management_actions config allowlist."""
+
+    # -- check_fn behavior --------------------------------------------------
+
+    def test_check_fn_all_allowed_when_config_unset(self):
+        """Unset config (returns None) means all tools pass check_fn."""
+        from plugins.platforms.eko.tools import _make_check_fn
+        check = _make_check_fn("create_group")
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(None):
+            assert check() is True
+
+    def test_check_fn_allowed_when_action_in_list(self):
+        """Tool passes check_fn when its action is in the allowlist."""
+        from plugins.platforms.eko.tools import _make_check_fn
+        check = _make_check_fn("create_group")
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(["create_group", "query_users"]):
+            assert check() is True
+
+    def test_check_fn_blocked_when_action_not_in_list(self):
+        """Tool fails check_fn when its action is NOT in the allowlist."""
+        from plugins.platforms.eko.tools import _make_check_fn
+        check = _make_check_fn("create_group")
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(["query_users"]):
+            assert check() is False
+
+    def test_check_fn_all_blocked_when_empty_list(self):
+        """Empty allowlist means no tools pass check_fn."""
+        from plugins.platforms.eko.tools import _make_check_fn
+        check = _make_check_fn("query_users")
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions([]):
+            assert check() is False
+
+    def test_check_fn_adapter_not_connected_blocks_regardless(self):
+        """Adapter not connected overrides config allowlist."""
+        from plugins.platforms.eko.tools import _make_check_fn
+        check = _make_check_fn("create_group")
+        with _patch_eko_client(None), \
+             _patch_management_actions(None):
+            assert check() is False
+
+    # -- handler defense-in-depth -------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_handler_create_group_blocked_by_config(self):
+        """Handler returns config-gate error when action is disabled."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(["query_users"]):
+            result = json.loads(
+                await _handle_create_group({"member_uids": ["u1"]})
+            )
+        assert "error" in result
+        assert "disabled by config" in result["error"]
+        assert "create_group" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_handler_create_topic_blocked_by_config(self):
+        from plugins.platforms.eko.tools import _handle_create_topic
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(["query_users"]):
+            result = json.loads(
+                await _handle_create_topic({"group_id": "g1", "name": "X"})
+            )
+        assert "error" in result
+        assert "disabled by config" in result["error"]
+        assert "create_topic" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_handler_query_users_blocked_by_config(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(["create_group"]):
+            result = json.loads(
+                await _handle_query_users({"username": "alice"})
+            )
+        assert "error" in result
+        assert "disabled by config" in result["error"]
+        assert "query_users" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_handler_create_group_allowed_by_config(self):
+        """Handler proceeds normally when action is in the allowlist."""
+        from plugins.platforms.eko.tools import _handle_create_group
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(["create_group"]):
+            result = json.loads(
+                await _handle_create_group({"member_uids": ["u1"]})
+            )
+        assert result.get("_id") == "grp_new"
+
+    @pytest.mark.asyncio
+    async def test_handler_query_users_allowed_by_config(self):
+        from plugins.platforms.eko.tools import _handle_query_users
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(["query_users"]):
+            result = json.loads(
+                await _handle_query_users({"username": "alice"})
+            )
+        assert isinstance(result, list)
+        assert result[0]["username"] == "alice"
+
+    @pytest.mark.asyncio
+    async def test_handler_all_allowed_when_config_unset(self):
+        """All handlers work when config is unset (backward compatible)."""
+        from plugins.platforms.eko.tools import _handle_create_group, _handle_create_topic, _handle_query_users
+        client = _make_client_mock()
+        with _patch_eko_client(client), \
+             _patch_management_actions(None):
+            r1 = json.loads(await _handle_create_group({"member_uids": ["u1"]}))
+            r2 = json.loads(await _handle_create_topic({"group_id": "g1", "name": "X"}))
+            r3 = json.loads(await _handle_query_users({"username": "alice"}))
+        assert r1.get("_id") == "grp_new"
+        assert r2.get("_id") == "top_new"
+        assert isinstance(r3, list)
+
+    # -- config loading -----------------------------------------------------
+
+    def test_load_config_filters_invalid_names(self):
+        """Invalid action names are filtered out; valid ones are kept."""
+        from plugins.platforms.eko.tools import _load_management_actions_config
+        mock_cfg = MagicMock()
+        mock_cfg.get.return_value = {"management_actions": ["create_group", "bogus", "query_users"]}
+        with patch("plugins.platforms.eko.tools.logger"), \
+             patch("hermes_cli.config.load_config", return_value=mock_cfg):
+            result = _load_management_actions_config()
+        assert result == ["create_group", "query_users"]
+
+    def test_load_config_returns_none_when_unset(self):
+        from plugins.platforms.eko.tools import _load_management_actions_config
+        mock_cfg = MagicMock()
+        mock_cfg.get.return_value = {}
+        with patch("hermes_cli.config.load_config", return_value=mock_cfg):
+            result = _load_management_actions_config()
+        assert result is None
+
+    def test_load_config_comma_separated_string(self):
+        from plugins.platforms.eko.tools import _load_management_actions_config
+        mock_cfg = MagicMock()
+        mock_cfg.get.return_value = {"management_actions": "create_group, query_users"}
+        with patch("hermes_cli.config.load_config", return_value=mock_cfg):
+            result = _load_management_actions_config()
+        assert result == ["create_group", "query_users"]
 

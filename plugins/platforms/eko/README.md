@@ -168,6 +168,29 @@ tools:
 These tools are **async** and gated on the Eko adapter being connected in the gateway.
 They disappear from the tool list when the gateway isn't running.
 
+### Restricting management tools
+
+Use the ``eko.management_actions`` config key to control which management tools
+the agent can use. When unset (default), all three tools are available.
+
+```yaml
+# ~/.hermes/config.yaml
+eko:
+  management_actions:
+    - query_users          # read-only, safe
+    - create_topic         # creates but doesn't add members
+    # create_group omitted → agent cannot create groups
+```
+
+Accepts a YAML list or a comma-separated string. Unknown action names are
+logged as warnings and ignored.
+
+| Action | Tool | Description |
+|--------|------|-------------|
+| `create_group` | `eko_create_group` | Create group chats |
+| `create_topic` | `eko_create_topic` | Create topics in groups |
+| `query_users` | `eko_query_users` | Look up user IDs |
+
 ### Example usage in chat
 
 ```
@@ -244,7 +267,12 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 - **Require-mention filter for group chats.** `EKO_REQUIRE_MENTION=true` makes the bot only respond to group messages that contain a trigger word (default: `hermes`). DMs always respond. Customizable via `EKO_MENTION_TRIGGERS`. Case-insensitive, word-boundary matching, works anywhere in text (matches Eko's `@BotName` plain-text mention format).
 - **Group/topic allowlist.** `EKO_ALLOW_ALL_GROUPS=false` restricts the bot to specific groups (`EKO_ALLOWED_GROUPS`) or topics (`EKO_ALLOWED_TOPICS` in `gid:tid` format). Both filters compose: a message must pass the group allowlist AND mention check. DMs are unaffected (Issue #26).
-- 24 new tests (174 total, up from 150).
+- 30 new tests (180 total, up from 150).
+
+### v1.6.1
+
+- **Management actions config gate.** New `eko.management_actions` config key controls which management tools the agent can use. Unset = all allowed (backward compatible). Set to a list to restrict; e.g. `query_users` only gives read-only access. Unknown action names are logged as warnings and ignored (Issue #23).
+- 14 new tests (159 total, up from 145).
 
 ### v1.6.0
 
@@ -324,6 +352,7 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
+| ~~Management actions config gate~~ | `eko.management_actions` allowlist to control which tools are available | Issue #23 ✅ |
 | Connection pooling | Reuse `aiohttp.ClientSession` across requests | Current pattern creates one per request (matches LINE adapter) |
 | Typing indicator | Show agent-is-working feedback | Eko may not have a typing API — needs investigation |
 | Markdown formatting | Test if Eko renders any formatting, adjust `format_message()` | Currently passes text through as-is |
