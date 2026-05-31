@@ -58,37 +58,63 @@ WEBHOOK_BODY_MAX_BYTES = 1_048_576  # 1 MiB
 DEFAULT_MESSAGE_MAX_CHARS = 5000  # conservative until Eko limit confirmed
 
 # Markdown stripping patterns — Eko renders plain text only.
-_MD_CODE_BLOCK_RE = re.compile(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", re.DOTALL)
-_MD_CODE_INLINE_RE = re.compile(r"`([^`]+)`")
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _MD_ITAL_RE = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
 _MD_HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
-_MD_BULLET_RE = re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE)
+_MD_BULLET_RE = re.compile(r"^(\s*)[-*+]\s+", re.MULTILINE)
+_MD_TABLE_SEP_RE = re.compile(r"^\|[\s|:?-]+\|$", re.MULTILINE)
+_MD_MULTILINE_QUOTE_RE = re.compile(r"^>>>\s*\n", re.MULTILINE)
 
 
 def strip_markdown(text: str) -> str:
     """Strip Markdown that Eko can't render. URLs are preserved.
 
-    Eko's text rendering is plain text only — bold, italics, code
-    fences, headings, and bullet markers all render as literal
-    characters.  Bare URLs are auto-linked by the client, but
-    ``[label](url)`` syntax is not.  This converts ``[label](url)``
-    to ``label (url)`` so the URL remains tappable, then strips
-    the rest.
+    Eko's text rendering is plain text only — bold, italics, and
+    headings render as literal characters.  Bare URLs are auto-linked
+    by the client, but ``[label](url)`` syntax is not.
+
+    What gets stripped:
+      bold, italic, heading markers, markdown links (→ label + url).
+
+    What gets kept:
+      code fences and inline code (visually meaningful in plain text),
+      blockquote ``> `` prefixes (preserve visual quote structure),
+      table pipe ``|`` data rows (strip separator rows only),
+      bullet indentation (nested items keep their indent).
     """
     if not text:
         return text
 
-    def _unfence(m: re.Match) -> str:
-        return m.group(1).rstrip("\n")
-    text = _MD_CODE_BLOCK_RE.sub(_unfence, text)
-    text = _MD_CODE_INLINE_RE.sub(r"\1", text)
+    # Strip table separator rows (|---|---|) but keep data rows.
+    text = _MD_TABLE_SEP_RE.sub("", text)
+
+    # Normalize >>> multi-line blockquotes to per-line > prefixes.
+    # Find >>> blocks and prefix each subsequent line with > .
+    lines = text.split("\n")
+    result: list[str] = []
+    in_multiline_quote = False
+    for line in lines:
+        if _MD_MULTILINE_QUOTE_RE.match(line + "\n") and not in_multiline_quote:
+            in_multiline_quote = True
+            continue  # drop the >>> line itself
+        if in_multiline_quote:
+            # An empty line or a line without leading context ends the quote.
+            if line.strip() == "":
+                in_multiline_quote = False
+                result.append(line)
+            else:
+                result.append("> " + line.lstrip("> "))
+        else:
+            result.append(line)
+    text = "\n".join(result)
+
     text = _MD_LINK_RE.sub(lambda m: f"{m.group(1)} ({m.group(2)})", text)
     text = _MD_BOLD_RE.sub(r"\1", text)
     text = _MD_ITAL_RE.sub(r"\1", text)
     text = _MD_HEADING_RE.sub("", text)
-    text = _MD_BULLET_RE.sub("\u2022 ", text)
+    # Preserve indentation in bullets (group 1 = leading whitespace).
+    text = _MD_BULLET_RE.sub(lambda m: m.group(1) + "\u2022 ", text)
     return text
 
 

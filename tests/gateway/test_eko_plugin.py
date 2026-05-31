@@ -2152,13 +2152,13 @@ class TestFormatMessage:
         adapter = EkoAdapter.__new__(EkoAdapter)
         assert adapter.format_message("# Title\n## Sub\nbody") == "Title\nSub\nbody"
 
-    def test_strips_code_fences_keeps_content(self):
+    def test_keeps_code_fences(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("```python\nprint('hi')\n```") == "print('hi')"
+        assert adapter.format_message("```python\nprint('hi')\n```") == "```python\nprint('hi')\n```"
 
-    def test_strips_inline_code(self):
+    def test_keeps_inline_code(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter.format_message("run `pip install` now") == "run pip install now"
+        assert adapter.format_message("run `pip install` now") == "run `pip install` now"
 
     def test_converts_markdown_links(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
@@ -2171,8 +2171,13 @@ class TestFormatMessage:
 
     def test_strips_bullet_markers(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
-        result = adapter.format_message("- item1\n- item2\n- nested")
-        assert result == "\u2022 item1\n\u2022 item2\n\u2022 nested"
+        result = adapter.format_message("- item1\n- item2")
+        assert result == "\u2022 item1\n\u2022 item2"
+
+    def test_preserves_bullet_indent(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        result = adapter.format_message("- item1\n  - nested\n    - deeper")
+        assert result == "\u2022 item1\n  \u2022 nested\n    \u2022 deeper"
 
     def test_empty_string(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
@@ -2181,4 +2186,30 @@ class TestFormatMessage:
     def test_plain_text_unchanged(self):
         adapter = EkoAdapter.__new__(EkoAdapter)
         assert adapter.format_message("plain text here") == "plain text here"
+
+    def test_strips_table_separator_keeps_data_rows(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        md = "| a | b |\n|---|---|\n| 1 | 2 |"
+        result = adapter.format_message(md)
+        assert "| a | b |" in result
+        assert "| 1 | 2 |" in result
+        assert "|---" not in result
+
+    def test_preserves_single_line_blockquote(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        assert adapter.format_message("> some quote") == "> some quote"
+
+    def test_normalizes_multiline_blockquote(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        md = ">>> \nline one\nline two"
+        result = adapter.format_message(md)
+        assert result == "> line one\n> line two"
+
+    def test_multiline_blockquote_ends_at_blank_line(self):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        md = ">>> \nquoted text\n\nafter quote"
+        result = adapter.format_message(md)
+        assert "> quoted text" in result
+        assert "after quote" in result
+        assert result.index("> quoted text") < result.index("after quote")
 
