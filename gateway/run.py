@@ -16468,16 +16468,50 @@ class GatewayRunner:
             if not adapter:
                 return
 
-            # Skip tool progress for platforms that don't support message
-            # editing (e.g. iMessage/BlueBubbles) — each progress update
-            # would become a separate message bubble, which is noisy.
+            # No-edit platforms cannot update one progress bubble.  When tool
+            # progress is enabled, send one compact message per tool start
+            # instead of silently draining the queue.  Skip bookkeeping tuples
+            # (__dedup__, __reset__) that only make sense for editable bubbles.
+            #
+            # TODO(future): on tool.completed with is_error=True, send an
+            # error message (e.g. "❌ terminal: <error>") so no-edit users
+            # see tool failures in context.
             if type(adapter).edit_message is BasePlatformAdapter.edit_message:
-                while not progress_queue.empty():
+                while True:
                     try:
-                        progress_queue.get_nowait()
-                    except Exception:
-                        break
+                        if not _run_still_current():
+                            while not progress_queue.empty():
+                                try:
+                                    progress_queue.get_nowait()
+                                except Exception:
+                                    break
+                            return
+                        raw = progress_queue.get_nowait()
+                        if isinstance(raw, tuple):
+                            continue
+                        try:
+                            _agent_for_interrupt = agent_holder[0] if agent_holder else None
+                            if _agent_for_interrupt is not None and getattr(
+                                _agent_for_interrupt, "is_interrupted", False
+                            ):
+                                return
+                        except Exception:
+                            pass
+                        await adapter.send(
+                            chat_id=source.chat_id,
+                            content=str(raw),
+                            reply_to=_progress_reply_to,
+                            metadata=_progress_metadata,
+                        )
+                    except queue.Empty:
+                        await asyncio.sleep(0.3)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as e:
+                        logger.error("Separate progress message error: %s", e)
+                        await asyncio.sleep(1)
                 return
+
 
             progress_lines = []      # Accumulated tool lines for the CURRENT editable bubble
             progress_msg_id = None   # ID of the current progress message to edit
