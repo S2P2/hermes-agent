@@ -5,6 +5,11 @@
 # Hermes Agent ☤
 
 > **Fork notice:** This is the [S2P2/hermes-agent](https://github.com/S2P2/hermes-agent) fork, maintained to add **[Eko](https://eko.gitbook.io/api) messaging platform** support via [`plugins/platforms/eko/`](plugins/platforms/eko/). Upstream changes from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) are regularly merged in.
+>
+> **Fork features:**
+>
+> - **Eko platform adapter** (`plugins/platforms/eko/`) — full inbound/outbound messaging with group/topic routing, media sending, management API tools (create group, create topic, add/remove members), quick replies for exec approvals, webhook signature enforcement, and per-group mention/allowlist filtering.
+> - **Compact tool progress for no-edit platforms** — adapters without `edit_message` support (Eko, Signal, SMS, email, BlueBubbles, etc.) now show one `🔧` message per tool invocation when `tool_progress` is enabled, instead of silently dropping progress. ([#59](https://github.com/S2P2/hermes-agent/pull/59))
 
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
