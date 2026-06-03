@@ -4,20 +4,16 @@ Registered as async Hermes tools via the Eko plugin. Only available when
 the Eko adapter is connected in the gateway **and** the tool is allowed by
 the ``eko.management_actions`` config allowlist.
 
-Each tool resolves the live ``_EkoClient`` from the running gateway's
-adapter instance, then delegates to the corresponding ``_EkoClient`` method.
+Each tool resolves the live ``_EkoClient`` from the shared management
+runtime (injected by the adapter at connect time), then delegates to the
+corresponding ``_EkoClient`` method.
 """
 
 from __future__ import annotations
 
 from tools.registry import registry
 
-from plugins.platforms.eko.management import (
-    EkoManagementRuntime,
-    VALID_MANAGEMENT_ACTIONS as _VALID_MANAGEMENT_ACTIONS,
-    get_connected_client as _runtime_get_eko_client,
-    load_management_actions_config as _runtime_load_management_actions_config,
-)
+from plugins.platforms.eko.management import get_default_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -25,41 +21,11 @@ from plugins.platforms.eko.management import (
 # ---------------------------------------------------------------------------
 
 
-def _get_eko_client():
-    """Compatibility wrapper for tests; runtime owns connected-client lookup."""
-    return _runtime_get_eko_client()
-
-
-def _load_management_actions_config():
-    """Compatibility wrapper for tests; runtime owns config loading."""
-    return _runtime_load_management_actions_config()
-
-
-def _runtime() -> EkoManagementRuntime:
-    return EkoManagementRuntime(
-        client_getter=_get_eko_client,
-        action_loader=_load_management_actions_config,
-    )
-
-
-def _check_eko_active() -> bool:
-    """Gate: tools only appear when the Eko adapter is connected."""
-    return _runtime().get_client() is not None
-
-
-def _is_action_allowed(action: str) -> bool:
-    return _runtime().is_action_allowed(action)
-
-
 def _make_check_fn(action: str):
     """Create a ``check_fn`` that gates on adapter connection + config allowlist."""
     def _check() -> bool:
-        return _runtime().check_action_available(action)
+        return get_default_runtime().check_action_available(action)
     return _check
-
-
-def _config_gate_error(action: str):
-    return _runtime().config_gate_error(action)
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +116,15 @@ _EKO_QUERY_USERS_SCHEMA = {
 
 
 async def _handle_create_group(args: dict, **kw) -> str:
-    return await _runtime().create_group(args)
+    return await get_default_runtime().create_group(args)
 
 
 async def _handle_create_topic(args: dict, **kw) -> str:
-    return await _runtime().create_topic(args)
+    return await get_default_runtime().create_topic(args)
 
 
 async def _handle_query_users(args: dict, **kw) -> str:
-    return await _runtime().query_users(args)
+    return await get_default_runtime().query_users(args)
 
 
 # ---------------------------------------------------------------------------

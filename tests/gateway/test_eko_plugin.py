@@ -2901,9 +2901,25 @@ def _make_client_mock():
     return client
 
 
+class _PatchEkoClient:
+    """Context manager that sets/clears the client on the default management runtime."""
+
+    def __init__(self, client_mock):
+        from plugins.platforms.eko.management import get_default_runtime
+        self._runtime = get_default_runtime()
+        self._client_mock = client_mock
+
+    def __enter__(self):
+        self._runtime.set_client(self._client_mock)
+        return self
+
+    def __exit__(self, *args):
+        self._runtime.clear_client()
+
+
 def _patch_eko_client(client_mock):
-    """Patch _get_eko_client to return the given mock."""
-    return patch("plugins.platforms.eko.tools._get_eko_client", return_value=client_mock)
+    """Set the client on the default management runtime (restored on exit)."""
+    return _PatchEkoClient(client_mock)
 
 
 class TestEkoCreateGroupTool:
@@ -3190,12 +3206,64 @@ class TestEkoQueryUsersTool:
 # ---------------------------------------------------------------------------
 
 
+class _PatchManagementActions:
+    """Context manager that overrides the action_loader on the default management runtime."""
+
+    def __init__(self, return_value):
+        from plugins.platforms.eko.management import get_default_runtime
+        self._runtime = get_default_runtime()
+        self._return_value = return_value
+        self._original_loader = None
+
+    def __enter__(self):
+        self._original_loader = self._runtime.set_action_loader(
+            lambda: self._return_value
+        )
+        return self
+
+    def __exit__(self, *args):
+        self._runtime.set_action_loader(self._original_loader)
+
+
 def _patch_management_actions(return_value):
-    """Patch _load_management_actions_config to return a fixed value."""
-    return patch(
-        "plugins.platforms.eko.tools._load_management_actions_config",
-        return_value=return_value,
-    )
+    """Override the action_loader on the default management runtime."""
+    return _PatchManagementActions(return_value)
+
+
+class TestManagementRuntimeLifecycle:
+    """Direct tests for set_client/clear_client lifecycle."""
+
+    def test_set_then_get_client(self):
+        from plugins.platforms.eko.management import get_default_runtime
+        rt = get_default_runtime()
+        sentinel = object()
+        rt.set_client(sentinel)
+        try:
+            assert rt.get_client() is sentinel
+        finally:
+            rt.clear_client()
+
+    def test_clear_client_returns_none(self):
+        from plugins.platforms.eko.management import get_default_runtime
+        rt = get_default_runtime()
+        sentinel = object()
+        rt.set_client(sentinel)
+        rt.clear_client()
+        # After clear, get_client should fall through to the getter fallback.
+        # In a test env with no gateway runner, the fallback returns None.
+        assert rt.get_client() is None
+
+    def test_set_action_loader_round_trip(self):
+        from plugins.platforms.eko.management import get_default_runtime
+        rt = get_default_runtime()
+        original = rt._action_loader
+        sentinel = ["create_group"]
+        prev = rt.set_action_loader(lambda: sentinel)
+        try:
+            assert prev is original
+            assert rt._action_loader() == sentinel
+        finally:
+            rt.set_action_loader(prev)
 
 
 class TestManagementActionsConfigGate:
@@ -3331,28 +3399,28 @@ class TestManagementActionsConfigGate:
 
     def test_load_config_filters_invalid_names(self):
         """Invalid action names are filtered out; valid ones are kept."""
-        from plugins.platforms.eko.tools import _load_management_actions_config
+        from plugins.platforms.eko.management import load_management_actions_config
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {"management_actions": ["create_group", "bogus", "query_users"]}
         with patch("plugins.platforms.eko.management.logger"), \
              patch("hermes_cli.config.load_config", return_value=mock_cfg):
-            result = _load_management_actions_config()
+            result = load_management_actions_config()
         assert result == ["create_group", "query_users"]
 
     def test_load_config_returns_none_when_unset(self):
-        from plugins.platforms.eko.tools import _load_management_actions_config
+        from plugins.platforms.eko.management import load_management_actions_config
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {}
         with patch("hermes_cli.config.load_config", return_value=mock_cfg):
-            result = _load_management_actions_config()
+            result = load_management_actions_config()
         assert result is None
 
     def test_load_config_comma_separated_string(self):
-        from plugins.platforms.eko.tools import _load_management_actions_config
+        from plugins.platforms.eko.management import load_management_actions_config
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {"management_actions": "create_group, query_users"}
         with patch("hermes_cli.config.load_config", return_value=mock_cfg):
-            result = _load_management_actions_config()
+            result = load_management_actions_config()
         assert result == ["create_group", "query_users"]
 
 

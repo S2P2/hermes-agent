@@ -30,7 +30,12 @@ TOOL_TO_ACTION = {
 
 
 def get_connected_client() -> "_EkoClient | None":
-    """Return the ``_EkoClient`` from the running Eko adapter, or None."""
+    """Fallback client resolver — reaches through the gateway runner.
+
+ Only used when no client has been injected via ``set_client()``.
+ In normal gateway operation the adapter injects the client directly
+ at connection time, so this path is rarely hit.
+ """
     try:
         from gateway.run import _gateway_runner_ref
         from gateway.config import Platform as _Platform
@@ -94,10 +99,32 @@ class EkoManagementRuntime:
         client_getter: Callable[[], "_EkoClient | None"] = get_connected_client,
         action_loader: Callable[[], Optional[List[str]]] = load_management_actions_config,
     ) -> None:
+        self._client: "Optional[_EkoClient]" = None
         self._client_getter = client_getter
         self._action_loader = action_loader
 
+    def set_client(self, client: "_EkoClient") -> None:
+        """Inject a connected client (called by the adapter at connect time)."""
+        self._client = client
+
+    def clear_client(self) -> None:
+        """Clear the injected client (called by the adapter at disconnect time)."""
+        self._client = None
+
+    def set_action_loader(
+        self, loader: Callable[[], Optional[List[str]]]
+    ) -> Optional[Callable[[], Optional[List[str]]]]:
+        """Override the action-allowlist loader.
+
+        Returns the previous loader so callers can restore it.
+        """
+        prev = self._action_loader
+        self._action_loader = loader
+        return prev
+
     def get_client(self) -> "_EkoClient | None":
+        if self._client is not None:
+            return self._client
         return self._client_getter()
 
     def config_gate_error(self, action: str) -> Optional[str]:
@@ -227,3 +254,17 @@ class EkoManagementRuntime:
         return ", ".join(
             f"{u.get('username')} ({u.get('_id', '?')})" for u in users
         )
+
+
+# ---------------------------------------------------------------------------
+# Module-level default runtime
+# ---------------------------------------------------------------------------
+
+# Process-global singleton: safe because each Hermes profile runs in its
+# own process. The adapter injects the client at connect time.
+_default_runtime = EkoManagementRuntime()
+
+
+def get_default_runtime() -> EkoManagementRuntime:
+    """Return the shared management runtime used by all Eko management tools."""
+    return _default_runtime

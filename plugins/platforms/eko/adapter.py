@@ -74,6 +74,7 @@ DEFAULT_REPLY_TOKEN_TTL = 50
 
 
 from .client import _EkoClient
+from .management import get_default_runtime as _get_management_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +224,7 @@ class EkoAdapter(BasePlatformAdapter):
             return False
 
         self._mark_connected()
+        _get_management_runtime().set_client(self._client)
         logger.info(
             "Eko: webhook listening on %s:%s%s",
             cfg.webhook_host,
@@ -233,6 +235,7 @@ class EkoAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._mark_disconnected()
+        _get_management_runtime().clear_client()
 
         if self._site is not None:
             try:
