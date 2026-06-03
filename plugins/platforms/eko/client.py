@@ -117,6 +117,83 @@ class _EkoClient:
     def _auth_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
+    async def _perform_request(
+        self,
+        method: str,
+        url: str,
+        kwargs: Dict[str, Any],
+        expect: str,
+    ) -> tuple[int, Any, str]:
+        """Perform one HTTP attempt and return ``(status, payload, text)``.
+
+        Tests can patch this seam to script transport responses without
+        mocking aiohttp's async context-manager stack.
+        """
+        import aiohttp
+
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            request = session.get if method == "GET" else session.post
+            async with request(url, **kwargs) as resp:
+                if resp.status >= 400:
+                    return resp.status, None, await resp.text()
+                if expect == "json":
+                    return resp.status, await resp.json(), ""
+                if expect == "bytes":
+                    return resp.status, await resp.read(), ""
+                return resp.status, None, ""
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Optional[Dict[str, Any]] = None,
+        data: Any = None,
+        params: Optional[Dict[str, str]] = None,
+        expect: str = "json",
+        error_label: Optional[str] = None,
+    ) -> Any:
+        """Single authenticated request path for JSON, multipart, and bytes."""
+        method = method.upper()
+        token = await self.ensure_token()
+        url = f"{self._base_url}{path}"
+
+        for should_retry in (True, False):
+            headers = self._auth_headers(token)
+            if json is not None:
+                headers = {**headers, "Content-Type": "application/json"}
+            kwargs = {"headers": headers}
+            if method == "GET" and params is not None:
+                kwargs["params"] = params
+            if method != "GET" and json is not None:
+                kwargs["json"] = json
+            if method != "GET" and data is not None:
+                kwargs["data"] = data
+
+            status, payload, body = await self._perform_request(method, url, kwargs, expect)
+            if status == 401:
+                self.clear_token()
+                if should_retry:
+                    token = await self.ensure_token()
+                    continue
+                if error_label == "fetch_picture":
+                    raise RuntimeError(
+                        "Eko API 401 after retry (fetch_picture): token exhausted"
+                    )
+                raise RuntimeError(
+                    f"Eko API 401 after retry ({path}): {body[:200]}"
+                )
+            if status >= 400:
+                if error_label == "fetch_picture":
+                    raise RuntimeError(
+                        f"Eko fetch picture failed ({status}): {body[:200]}"
+                    )
+                raise RuntimeError(
+                    f"Eko API {status} ({method} {path}): {body[:200]}"
+                )
+            return payload
+
     async def _request_json_post(
         self,
         path: str,
@@ -124,42 +201,13 @@ class _EkoClient:
         json: Optional[Dict[str, Any]] = None,
         expect_json: bool = True,
     ) -> Optional[dict]:
-        """Send a JSON POST request with auth and auto-retry on 401.
-
-        If ``expect_json`` is True (default), parses and returns the JSON
-        response body.  Otherwise returns ``None``.
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}{path}"
-        headers = {**self._auth_headers(token), "Content-Type": "application/json"}
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-
-        for _attempt in (True, False):
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.post(url, headers=headers, json=json) as resp:
-                    if resp.status == 401:
-                        self.clear_token()
-                        if _attempt:
-                            token = await self.ensure_token()
-                            headers = {
-                                **self._auth_headers(token),
-                                "Content-Type": "application/json",
-                            }
-                            continue
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Eko API 401 after retry ({path}): {body[:200]}"
-                        )
-                    if resp.status >= 400:
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Eko API {resp.status} (POST {path}): {body[:200]}"
-                        )
-                    if expect_json:
-                        return await resp.json()
-                    return None
+        """Send a JSON POST request with auth and auto-retry on 401."""
+        return await self._request(
+            "POST",
+            path,
+            json=json,
+            expect="json" if expect_json else "none",
+        )
 
     async def _request_json_get(
         self,
@@ -168,39 +216,13 @@ class _EkoClient:
         params: Optional[Dict[str, str]] = None,
         expect_json: bool = True,
     ) -> Optional[dict]:
-        """Send a GET request with auth and auto-retry on 401.
-
-        If ``expect_json`` is True (default), parses and returns the JSON
-        response body.  Otherwise returns ``None``.
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}{path}"
-        headers = self._auth_headers(token)
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-
-        for _attempt in (True, False):
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.get(url, headers=headers, params=params) as resp:
-                    if resp.status == 401:
-                        self.clear_token()
-                        if _attempt:
-                            token = await self.ensure_token()
-                            headers = self._auth_headers(token)
-                            continue
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Eko API 401 after retry ({path}): {body[:200]}"
-                        )
-                    if resp.status >= 400:
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Eko API {resp.status} (GET {path}): {body[:200]}"
-                        )
-                    if expect_json:
-                        return await resp.json()
-                    return None
+        """Send a GET request with auth and auto-retry on 401."""
+        return await self._request(
+            "GET",
+            path,
+            params=params,
+            expect="json" if expect_json else "none",
+        )
 
     async def _request_form(
         self,
@@ -209,39 +231,13 @@ class _EkoClient:
         data: Any,
         expect_json: bool = False,
     ) -> Optional[dict]:
-        """Send a multipart/form-data POST with auth and auto-retry on 401.
-
-        If ``expect_json`` is True, parses and returns the JSON response body.
-        Otherwise returns ``None``.
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}{path}"
-        headers = self._auth_headers(token)
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-
-        for _attempt in (True, False):
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.post(url, headers=headers, data=data) as resp:
-                    if resp.status == 401:
-                        self.clear_token()
-                        if _attempt:
-                            token = await self.ensure_token()
-                            headers = self._auth_headers(token)
-                            continue
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Eko API 401 after retry ({path}): {body[:200]}"
-                        )
-                    if resp.status >= 400:
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Eko API {resp.status} (POST {path}): {body[:200]}"
-                        )
-                    if expect_json:
-                        return await resp.json()
-                    return None
+        """Send a multipart/form-data POST with auth and auto-retry on 401."""
+        return await self._request(
+            "POST",
+            path,
+            data=data,
+            expect="json" if expect_json else "none",
+        )
 
     # ------------------------------------------------------------------
     # Direct message endpoints
@@ -300,35 +296,13 @@ class _EkoClient:
         )
 
     async def fetch_picture(self, picture_id: str) -> bytes:
-        """Download an inbound picture from Eko by picture ID.
-
-        Uses a direct ``aiohttp`` call since it returns raw bytes, not JSON.
-        """
-        import aiohttp
-
-        token = await self.ensure_token()
-        url = f"{self._base_url}/file/view/{picture_id}?size=large"
-        timeout = aiohttp.ClientTimeout(total=self._timeout)
-
-        for _attempt in (True, False):
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.get(
-                    url, headers=self._auth_headers(token)
-                ) as resp:
-                    if resp.status == 401:
-                        self.clear_token()
-                        if _attempt:
-                            token = await self.ensure_token()
-                            continue
-                        raise RuntimeError(
-                            f"Eko API 401 after retry (fetch_picture): token exhausted"
-                        )
-                    if resp.status >= 400:
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Eko fetch picture failed ({resp.status}): {body[:200]}"
-                        )
-                    return await resp.read()
+        """Download an inbound picture from Eko by picture ID."""
+        return await self._request(
+            "GET",
+            f"/file/view/{picture_id}?size=large",
+            expect="bytes",
+            error_label="fetch_picture",
+        )
 
     async def push_picture(
         self,

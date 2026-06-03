@@ -56,7 +56,7 @@ optional_env:
     prompt: "Require mention in groups? (true/false)"
     password: false
   - name: EKO_MENTION_TRIGGERS
-    description: "Comma-separated trigger words for require_mention (default: hermes)"
+    description: "Comma-separated trigger words for require_mention (default: Hermes Agent)"
     prompt: "Mention trigger words (comma-separated)"
     password: false
   - name: EKO_ALLOWED_GROUPS

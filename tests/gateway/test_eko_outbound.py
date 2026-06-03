@@ -97,6 +97,27 @@ def test_explicit_standalone_malformed():
     assert route.error is not None
 
 
+@pytest.mark.asyncio
+async def test_text_malformed_explicit_route_returns_error_without_client_calls():
+    """Malformed explicit routes fail before any text delivery attempt."""
+    client = MagicMock()
+    client.reply_text = AsyncMock()
+    client.push_text = AsyncMock()
+    client.push_group_text = AsyncMock()
+
+    sender = _make_sender(reply_tokens={"group:only-one-part": ("tok", time.time() + 60)})
+    sender._client = client
+
+    result = await sender.send_text("group:only-one-part", "hello")
+
+    assert result.success is False
+    assert result.retryable is False
+    assert "Invalid explicit routing format" in result.error
+    client.reply_text.assert_not_called()
+    client.push_text.assert_not_called()
+    client.push_group_text.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Test #4 — Text DM: reply token consumed first, then push fallback
 # ---------------------------------------------------------------------------
@@ -183,6 +204,27 @@ async def test_text_group_uses_group_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_image_malformed_explicit_route_returns_error_without_client_calls():
+    """Malformed explicit routes fail before any image delivery attempt."""
+    client = MagicMock()
+    client.reply_picture = AsyncMock()
+    client.push_picture = AsyncMock()
+    client.push_group_picture = AsyncMock()
+
+    sender = _make_sender(reply_tokens={"group:only-one-part": ("tok", time.time() + 60)})
+    sender._client = client
+
+    result = await sender.send_image("group:only-one-part", b"\x89PNG", "img.png")
+
+    assert result.success is False
+    assert result.retryable is False
+    assert "Invalid explicit routing format" in result.error
+    client.reply_picture.assert_not_called()
+    client.push_picture.assert_not_called()
+    client.push_group_picture.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_image_dm_reply_then_push():
     """First image send uses reply_picture; second uses push_picture."""
     client = MagicMock()
@@ -240,6 +282,25 @@ async def test_image_group_uses_group_endpoint():
 # ---------------------------------------------------------------------------
 # Test #9 — File DM: always push_file (no reply endpoint)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_malformed_explicit_route_returns_error_without_client_calls():
+    """Malformed explicit routes fail before any file delivery attempt."""
+    client = MagicMock()
+    client.push_file = AsyncMock()
+    client.push_group_file = AsyncMock()
+
+    sender = _make_sender()
+    sender._client = client
+
+    result = await sender.send_file("group:only-one-part", b"data", "doc.pdf")
+
+    assert result.success is False
+    assert result.retryable is False
+    assert "Invalid explicit routing format" in result.error
+    client.push_file.assert_not_called()
+    client.push_group_file.assert_not_called()
 
 
 @pytest.mark.asyncio

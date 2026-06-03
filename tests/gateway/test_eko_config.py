@@ -4,6 +4,7 @@ Each test exercises one behaviour through the public EkoConfig interface.
 """
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -223,6 +224,18 @@ def test_mention_triggers_default():
     assert cfg.mention_triggers == ["Hermes Agent"]
 
 
+def test_metadata_mentions_runtime_trigger_default():
+    """Plugin metadata and README document the runtime trigger default."""
+    plugin_yaml = Path("plugins/platforms/eko/plugin.yaml").read_text()
+    readme = Path("plugins/platforms/eko/README.md").read_text()
+
+    assert "EKO_MENTION_TRIGGERS" in plugin_yaml
+    assert "default: Hermes Agent" in plugin_yaml
+    assert "EKO_MENTION_TRIGGERS" in readme
+    assert "| `EKO_MENTION_TRIGGERS` | No | `Hermes Agent` |" in readme
+    assert "default: `Hermes Agent`" in readme
+
+
 # ---------------------------------------------------------------------------
 # Test #9 — custom mention triggers from env
 # ---------------------------------------------------------------------------
@@ -243,6 +256,31 @@ def test_mention_triggers_custom():
 # ---------------------------------------------------------------------------
 # Test #10 — extra dict fallback
 # ---------------------------------------------------------------------------
+
+
+def test_env_values_override_extra_values():
+    """Environment variables take precedence over config extra values."""
+    from plugins.platforms.eko.config import EkoConfig
+
+    with patch.dict(
+        os.environ,
+        {
+            "EKO_BASE_URL": "https://env.ekoapp.com",
+            "EKO_OAUTH_CLIENT_ID": "env-id",
+            "EKO_PORT": "1234",
+        },
+    ):
+        cfg = EkoConfig.from_env(
+            extra={
+                "base_url": "https://extra.ekoapp.com",
+                "oauth_client_id": "extra-id",
+                "port": 9999,
+            }
+        )
+
+    assert cfg.base_url == "https://env.ekoapp.com"
+    assert cfg.oauth_client_id == "env-id"
+    assert cfg.webhook_port == 1234
 
 
 def test_extra_dict_fallback():
