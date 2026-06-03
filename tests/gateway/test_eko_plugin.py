@@ -2421,13 +2421,11 @@ class TestStandaloneSendGroupRouting:
     async def test_standalone_send_routes_text_to_group(self):
         """_standalone_send uses push_group_text when live adapter has group routing."""
         mock_adapter = MagicMock()
-        mock_adapter._session_routing = {
-            "g1_t1": {
-                "uid": "user_1",
-                "groupId": "g1",
-                "topicId": "t1",
-                "groupType": "team",
-            },
+        mock_adapter.get_session_routing.return_value = {
+            "uid": "user_1",
+            "groupId": "g1",
+            "topicId": "t1",
+            "groupType": "team",
         }
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("eko"): mock_adapter}
@@ -2445,13 +2443,11 @@ class TestStandaloneSendGroupRouting:
         doc.write_bytes(b"%PDF-fake")
 
         mock_adapter = MagicMock()
-        mock_adapter._session_routing = {
-            "g1_t1": {
-                "uid": "user_1",
-                "groupId": "g1",
-                "topicId": "t1",
-                "groupType": "team",
-            },
+        mock_adapter.get_session_routing.return_value = {
+            "uid": "user_1",
+            "groupId": "g1",
+            "topicId": "t1",
+            "groupType": "team",
         }
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("eko"): mock_adapter}
@@ -2475,13 +2471,11 @@ class TestStandaloneSendGroupRouting:
         img.write_bytes(b"\xff\xd8\xff\xe0JPG")
 
         mock_adapter = MagicMock()
-        mock_adapter._session_routing = {
-            "g1_t1": {
-                "uid": "user_1",
-                "groupId": "g1",
-                "topicId": "t1",
-                "groupType": "team",
-            },
+        mock_adapter.get_session_routing.return_value = {
+            "uid": "user_1",
+            "groupId": "g1",
+            "topicId": "t1",
+            "groupType": "team",
         }
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("eko"): mock_adapter}
@@ -2607,13 +2601,11 @@ class TestStandaloneSendExplicitRouting:
     async def test_explicit_routing_preferred_over_live_adapter_valid(self):
         """Explicit routing takes priority over live adapter routing."""
         mock_adapter = MagicMock()
-        mock_adapter._session_routing = {
-            "old_chat": {
-                "uid": "user_1",
-                "groupId": "old_g",
-                "topicId": "old_t",
-                "groupType": "team",
-            },
+        mock_adapter.get_session_routing.return_value = {
+            "uid": "user_1",
+            "groupId": "old_g",
+            "topicId": "old_t",
+            "groupType": "team",
         }
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("eko"): mock_adapter}
@@ -2631,13 +2623,11 @@ class TestStandaloneSendExplicitRouting:
     async def test_live_adapter_fallback_still_works(self):
         """Without explicit routing, live adapter routing still works."""
         mock_adapter = MagicMock()
-        mock_adapter._session_routing = {
-            "g1_t1": {
-                "uid": "user_1",
-                "groupId": "g1",
-                "topicId": "t1",
-                "groupType": "team",
-            },
+        mock_adapter.get_session_routing.return_value = {
+            "uid": "user_1",
+            "groupId": "g1",
+            "topicId": "t1",
+            "groupType": "team",
         }
         mock_runner = MagicMock()
         mock_runner.adapters = {Platform("eko"): mock_adapter}

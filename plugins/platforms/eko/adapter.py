@@ -795,6 +795,14 @@ class EkoAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """No-op - Eko has no documented typing indicator API."""
 
+    def get_session_routing(self, chat_id: str) -> Optional[Dict[str, str]]:
+        """Return routing metadata for *chat_id*, or ``None`` if unknown.
+
+        Used by the standalone sender to resolve session-based routes
+        without accessing private adapter internals.
+        """
+        return self._session_routing.get(chat_id)
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         routing = self._session_routing.get(chat_id)
         if routing and routing.get("groupId"):
@@ -901,7 +909,7 @@ async def _standalone_send(
             if _runner:
                 _adapter = _runner.adapters.get(_Platform("eko"))
                 if _adapter:
-                    routing = _adapter._session_routing.get(chat_id)
+                    routing = _adapter.get_session_routing(chat_id)
                     if routing:
                         session_routing[chat_id] = routing
         except Exception:
