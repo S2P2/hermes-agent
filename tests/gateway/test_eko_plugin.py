@@ -293,6 +293,96 @@ class TestRequireMention:
         adapter.handle_message.assert_called_once()
 
 
+class TestContextAwareAllowlist:
+    """Issue #54: allowlists apply to the Eko conversation context."""
+
+    def _make_adapter(self, **overrides):
+        adapter = EkoAdapter.__new__(EkoAdapter)
+        adapter._dedup = _MessageDeduplicator()
+        adapter._bot_user_id = None
+        adapter.allow_all = overrides.get("allow_all", False)
+        adapter.allowed_users = overrides.get("allowed_users", set())
+        adapter.allow_all_groups = overrides.get("allow_all_groups", False)
+        adapter.allowed_groups = overrides.get("allowed_groups", set())
+        adapter.allowed_topics = overrides.get("allowed_topics", set())
+        adapter.require_mention = False
+        adapter.mention_triggers = []
+        adapter._reply_tokens = {}
+        adapter._session_routing = {}
+        adapter.reply_token_ttl = 50
+        adapter.handle_message = AsyncMock()
+        adapter.platform = Platform("eko")
+        return adapter
+
+    def _message_event(self, *, user_id="u1", group_id="", topic_id=""):
+        message = {
+            "id": "msg1",
+            "type": "text",
+            "text": "hello",
+        }
+        if group_id:
+            message.update({"groupId": group_id, "topicId": topic_id, "groupType": "group"})
+        return {
+            "replyToken": "tok",
+            "type": "message",
+            "source": {"userId": user_id, "username": "alice"},
+            "message": message,
+        }
+
+    @pytest.mark.asyncio
+    async def test_dm_from_unlisted_user_is_rejected(self):
+        adapter = self._make_adapter(allow_all=False, allowed_users={"allowed"})
+
+        await adapter._dispatch_event(self._message_event(user_id="stranger"))
+
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allowed_group_accepts_unlisted_sender(self):
+        adapter = self._make_adapter(
+            allow_all=False,
+            allowed_users={"someone-else"},
+            allow_all_groups=False,
+            allowed_groups={"g1"},
+        )
+
+        await adapter._dispatch_event(
+            self._message_event(user_id="stranger", group_id="g1", topic_id="t1")
+        )
+
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_allowed_topic_accepts_unlisted_sender(self):
+        adapter = self._make_adapter(
+            allow_all=False,
+            allowed_users={"someone-else"},
+            allow_all_groups=False,
+            allowed_topics={"g1:t1"},
+        )
+
+        await adapter._dispatch_event(
+            self._message_event(user_id="stranger", group_id="g1", topic_id="t1")
+        )
+
+        adapter.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_disallowed_group_rejects_unlisted_sender(self):
+        adapter = self._make_adapter(
+            allow_all=False,
+            allowed_users={"someone-else"},
+            allow_all_groups=False,
+            allowed_groups={"other-group"},
+        )
+
+        await adapter._dispatch_event(
+            self._message_event(user_id="stranger", group_id="g1", topic_id="t1")
+        )
+
+        adapter.handle_message.assert_not_called()
+
+
 class TestGroupAllowlist:
     """Issue #26: group/topic allowlist controls."""
 
@@ -887,15 +977,9 @@ class TestConfigValidation:
         cfg = _make_config()
         assert is_connected(cfg) == validate_config(cfg)
 
-    def test_check_requirements_needs_all_three(self):
-        with patch.dict(os.environ, {
-            "EKO_BASE_URL": "https://test.ekoapp.com",
-            "EKO_OAUTH_CLIENT_ID": "id",
-            "EKO_OAUTH_CLIENT_SECRET": "sec",
-        }):
+    def test_check_requirements_does_not_require_env_credentials(self):
+        with patch.dict(os.environ, {}, clear=True):
             assert check_requirements()
-        with patch.dict(os.environ, {"EKO_BASE_URL": "x"}, clear=True):
-            assert not check_requirements()
 
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1156,37 @@ def _mock_aiohttp_for_fetch(status: int, body: bytes = b"", refresh_status: int 
     mock_aiohttp.ClientTimeout = MagicMock()
     mock_aiohttp.FormData = MagicMock()
     return mock_aiohttp
+
+
+class TestEkoClientTransport:
+    """Direct transport seam tests that avoid aiohttp context-manager mocks."""
+
+    @pytest.mark.asyncio
+    async def test_request_retries_401_with_scripted_transport(self):
+        client = _make_eko_client()
+        client.ensure_token = AsyncMock(side_effect=["tok_old", "tok_new"])
+        client._perform_request = AsyncMock(side_effect=[
+            (401, None, "expired"),
+            (200, {"ok": True}, ""),
+        ])
+
+        result = await client._request("POST", "/bot/v1/test", json={"x": 1})
+
+        assert result == {"ok": True}
+        first_kwargs = client._perform_request.await_args_list[0].args[2]
+        second_kwargs = client._perform_request.await_args_list[1].args[2]
+        assert first_kwargs["headers"]["Authorization"] == "Bearer tok_old"
+        assert second_kwargs["headers"]["Authorization"] == "Bearer tok_new"
+        assert second_kwargs["headers"]["Content-Type"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_request_returns_raw_bytes_with_scripted_transport(self):
+        client = _make_eko_client()
+        client._perform_request = AsyncMock(return_value=(200, b"image-bytes", ""))
+
+        result = await client._request("GET", "/file/view/pic1?size=large", expect="bytes")
+
+        assert result == b"image-bytes"
 
 
 class TestFetchPicture:
@@ -3030,6 +3145,43 @@ class TestEkoCreateGroupUsernameResolution:
 
 
 
+class TestEkoManagementRuntime:
+    """Runtime-level tests for management behavior shared by the tools."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_member_usernames_exact_match(self):
+        from plugins.platforms.eko.management import EkoManagementRuntime
+
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u_alice", "username": "alice"},
+            {"_id": "u_alice2", "username": "alice123"},
+        ])
+        runtime = EkoManagementRuntime(client_getter=lambda: client)
+
+        uids, error = await runtime.resolve_member_usernames(client, ["alice"])
+
+        assert error is None
+        assert uids == ["u_alice"]
+
+    @pytest.mark.asyncio
+    async def test_resolve_member_usernames_reports_ambiguity(self):
+        from plugins.platforms.eko.management import EkoManagementRuntime
+
+        client = _make_client_mock()
+        client.query_users = AsyncMock(return_value=[
+            {"_id": "u1", "username": "alice"},
+            {"_id": "u2", "username": "alice"},
+        ])
+        runtime = EkoManagementRuntime(client_getter=lambda: client)
+
+        uids, error = await runtime.resolve_member_usernames(client, ["alice"])
+
+        assert uids == []
+        assert error is not None
+        assert "ambiguous" in error.lower()
+
+
 class TestEkoCreateTopicTool:
 
     @pytest.mark.asyncio
@@ -3273,7 +3425,7 @@ class TestManagementActionsConfigGate:
         from plugins.platforms.eko.tools import _load_management_actions_config
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {"management_actions": ["create_group", "bogus", "query_users"]}
-        with patch("plugins.platforms.eko.tools.logger"), \
+        with patch("plugins.platforms.eko.management.logger"), \
              patch("hermes_cli.config.load_config", return_value=mock_cfg):
             result = _load_management_actions_config()
         assert result == ["create_group", "query_users"]

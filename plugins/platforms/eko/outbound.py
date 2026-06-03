@@ -138,6 +138,8 @@ class OutboundSender:
     async def send_text(self, chat_id: str, content: str) -> SendResult:
         """Send a text message, preferring reply token then push."""
         route = self.resolve_route(chat_id)
+        if route.error:
+            return SendResult(success=False, error=route.error, retryable=False)
 
         # Try reply token first for ALL route types (DM, group, explicit).
         token, used_reply = self._consume_reply_token(chat_id)
@@ -166,6 +168,8 @@ class OutboundSender:
     ) -> SendResult:
         """Send an image, preferring reply_picture then push."""
         route = self.resolve_route(chat_id)
+        if route.error:
+            return SendResult(success=False, error=route.error, retryable=False)
 
         # Try reply_picture for ALL route types (DM, group, explicit).
         token, used_reply = self._consume_reply_token(chat_id)
@@ -205,6 +209,8 @@ class OutboundSender:
     ) -> SendResult:
         """Send a file — always push (no reply endpoint for files)."""
         route = self.resolve_route(chat_id)
+        if route.error:
+            return SendResult(success=False, error=route.error, retryable=False)
 
         if self._is_group(route):
             await self._client.push_group_file(

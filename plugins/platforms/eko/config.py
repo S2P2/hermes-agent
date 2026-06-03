@@ -236,8 +236,14 @@ class EkoConfig:
         return group_id in self.allowed_groups
 
     def is_topic_allowed(self, group_id: str, topic_id: str) -> bool:
-        """Check if ``group_id:topic_id`` passes the topic allowlist."""
+        """Check if ``group_id:topic_id`` passes the topic allowlist.
+
+        A topic is allowed when its group is in ``allowed_groups`` *or*
+        the exact ``gid:tid`` pair is in ``allowed_topics``.
+        """
         if self.allow_all_groups:
+            return True
+        if group_id in self.allowed_groups:
             return True
         return f"{group_id}:{topic_id}" in self.allowed_topics
 

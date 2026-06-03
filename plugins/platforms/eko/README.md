@@ -146,7 +146,7 @@ Open Eko, create a 1:1 chat with the bot, and send a message.
 | `EKO_MAX_UPLOAD_BYTES` | No | `26214400` | Max file size for outbound uploads (25 MiB). Oversized files are rejected before reading into memory. |
 | `EKO_MAX_INBOUND_MEDIA_BYTES` | No | `26214400` | Max size for inbound picture downloads (25 MiB). Oversized downloads are discarded. |
 | `EKO_REQUIRE_MENTION` | No | `true` | Only respond to group messages containing a trigger word. DMs always respond. |
-| `EKO_MENTION_TRIGGERS` | No | `hermes` | Comma-separated trigger words for require_mention. Default: `hermes`. |
+| `EKO_MENTION_TRIGGERS` | No | `Hermes Agent` | Comma-separated trigger words for require_mention. Default: `Hermes Agent`. |
 | `EKO_ALLOWED_GROUPS` | No | (empty) | Comma-separated group IDs the bot responds to. |
 | `EKO_ALLOWED_TOPICS` | No | (empty) | Comma-separated `gid:tid` pairs for topic-level allowlist. |
 | `EKO_ALLOW_ALL_GROUPS` | No | `true` | Allow all groups (default). Set `false` to activate group/topic allowlist. |
@@ -286,7 +286,7 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 ### v1.7.0
 
-- **Require-mention filter for group chats.** `EKO_REQUIRE_MENTION=true` makes the bot only respond to group messages that contain a trigger word (default: `hermes`). DMs always respond. Customizable via `EKO_MENTION_TRIGGERS`. Case-insensitive, word-boundary matching, works anywhere in text (matches Eko's `@BotName` plain-text mention format).
+- **Require-mention filter for group chats.** `EKO_REQUIRE_MENTION=true` makes the bot only respond to group messages that contain a trigger word (default: `Hermes Agent`). DMs always respond. Customizable via `EKO_MENTION_TRIGGERS`. Case-sensitive, word-boundary matching, works anywhere in text (matches Eko's `@BotName` plain-text mention format).
 - **Group/topic allowlist.** `EKO_ALLOW_ALL_GROUPS=false` restricts the bot to specific groups (`EKO_ALLOWED_GROUPS`) or topics (`EKO_ALLOWED_TOPICS` in `gid:tid` format). Both filters compose: a message must pass the group allowlist AND mention check. DMs are unaffected (Issue #26).
 - 30 new tests (180 total, up from 150).
 

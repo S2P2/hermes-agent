@@ -10,17 +10,14 @@ adapter instance, then delegates to the corresponding ``_EkoClient`` method.
 
 from __future__ import annotations
 
-import json
-import logging
-import os
-from typing import TYPE_CHECKING, List, Optional
+from tools.registry import registry
 
-from tools.registry import registry, tool_error, tool_result
-
-logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from plugins.platforms.eko.adapter import _EkoClient
+from plugins.platforms.eko.management import (
+    EkoManagementRuntime,
+    VALID_MANAGEMENT_ACTIONS as _VALID_MANAGEMENT_ACTIONS,
+    get_connected_client as _runtime_get_eko_client,
+    load_management_actions_config as _runtime_load_management_actions_config,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -28,119 +25,41 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _get_eko_client() -> "_EkoClient | None":
-    """Return the ``_EkoClient`` from the running Eko adapter, or None."""
-    try:
-        from gateway.run import _gateway_runner_ref
-        from gateway.config import Platform as _Platform
+def _get_eko_client():
+    """Compatibility wrapper for tests; runtime owns connected-client lookup."""
+    return _runtime_get_eko_client()
 
-        runner = _gateway_runner_ref()
-        if not runner:
-            return None
-        adapter = runner.adapters.get(_Platform("eko"))
-        if adapter and hasattr(adapter, "_client"):
-            return adapter._client
-    except Exception:
-        pass
-    return None
+
+def _load_management_actions_config():
+    """Compatibility wrapper for tests; runtime owns config loading."""
+    return _runtime_load_management_actions_config()
+
+
+def _runtime() -> EkoManagementRuntime:
+    return EkoManagementRuntime(
+        client_getter=_get_eko_client,
+        action_loader=_load_management_actions_config,
+    )
 
 
 def _check_eko_active() -> bool:
     """Gate: tools only appear when the Eko adapter is connected."""
-    return _get_eko_client() is not None
-
-
-# ---------------------------------------------------------------------------
-# Config-based management action allowlist
-# ---------------------------------------------------------------------------
-
-# Canonical action names (match the _EkoClient method names, not the
-# registered tool names with the ``eko_`` prefix).
-_VALID_MANAGEMENT_ACTIONS = frozenset({"create_group", "create_topic", "query_users"})
-
-# Maps registered tool name → canonical action name.
-_TOOL_TO_ACTION = {
-    "eko_create_group": "create_group",
-    "eko_create_topic": "create_topic",
-    "eko_query_users": "query_users",
-}
-
-
-def _load_management_actions_config() -> Optional[List[str]]:
-    """Read ``eko.management_actions`` from user config.
-
-    Returns a list of allowed action names, or ``None`` if the user
-    hasn't restricted the set (default: all actions allowed).
-
-    Accepts either a comma-separated string or a YAML list.
-    Unknown action names are dropped with a log warning.
-    """
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-    except Exception as exc:
-        logger.debug("eko: could not load config (%s); allowing all management actions.", exc)
-        return None
-
-    raw = (cfg.get("eko") or {}).get("management_actions")
-    if raw is None or raw == "":
-        return None
-
-    if isinstance(raw, str):
-        names = [n.strip() for n in raw.split(",") if n.strip()]
-    elif isinstance(raw, (list, tuple)):
-        names = [str(n).strip() for n in raw if str(n).strip()]
-    else:
-        logger.warning(
-            "eko.management_actions: unexpected type %s; ignoring.",
-            type(raw).__name__,
-        )
-        return None
-
-    valid = [n for n in names if n in _VALID_MANAGEMENT_ACTIONS]
-    invalid = [n for n in names if n not in _VALID_MANAGEMENT_ACTIONS]
-    if invalid:
-        logger.warning(
-            "eko.management_actions: unknown action(s) ignored: %s. "
-            "Known: %s",
-            ", ".join(invalid), ", ".join(sorted(_VALID_MANAGEMENT_ACTIONS)),
-        )
-    return valid
+    return _runtime().get_client() is not None
 
 
 def _is_action_allowed(action: str) -> bool:
-    """Check if a management action is allowed by config.
-
-    Returns ``True`` when config is unset (backward compatible) or when
-    the action is in the explicit allowlist.
-    """
-    allowed = _load_management_actions_config()
-    if allowed is None:
-        return True
-    return action in allowed
+    return _runtime().is_action_allowed(action)
 
 
 def _make_check_fn(action: str):
     """Create a ``check_fn`` that gates on adapter connection + config allowlist."""
     def _check() -> bool:
-        if not _check_eko_active():
-            return False
-        return _is_action_allowed(action)
+        return _runtime().check_action_available(action)
     return _check
 
 
-def _config_gate_error(action: str) -> Optional[str]:
-    """Return a config-gate error message, or ``None`` if the action is allowed.
-
-    Used as a defense-in-depth check inside handlers.
-    """
-    allowed = _load_management_actions_config()
-    if allowed is not None and action not in allowed:
-        return (
-            f"Action '{action}' is disabled by config (eko.management_actions). "
-            f"Allowed: {', '.join(allowed) if allowed else '<none>'}"
-        )
-    return None
+def _config_gate_error(action: str):
+    return _runtime().config_gate_error(action)
 
 
 # ---------------------------------------------------------------------------
@@ -231,110 +150,15 @@ _EKO_QUERY_USERS_SCHEMA = {
 
 
 async def _handle_create_group(args: dict, **kw) -> str:
-    client = _get_eko_client()
-    if not client:
-        return tool_error("Eko adapter not connected")
-
-    # Defense in depth: config gate.
-    gate_err = _config_gate_error("create_group")
-    if gate_err:
-        return tool_error(gate_err)
-
-    # Resolve usernames → uids if needed.
-    uids: list[str] = list(args.get("member_uids") or [])
-    usernames: list[str] = list(args.get("member_usernames") or [])
-
-    if not uids and not usernames:
-        return tool_error("Provide member_usernames or member_uids")
-
-    for username in usernames:
-        try:
-            users = await client.query_users(username)
-        except Exception as exc:
-            return tool_error(f"Failed to query user '{username}': {exc}")
-        if not isinstance(users, list) or not users:
-            return tool_error(f"User '{username}' not found")
-
-        # Exact match only.
-        exact = [u for u in users if u.get("username") == username]
-        if len(exact) == 1:
-            uid = str(exact[0].get("_id", "")).strip()
-            if not uid:
-                return tool_error(
-                    f"User '{username}' has no valid user ID"
-                )
-            uids.append(uid)
-        elif len(exact) > 1:
-            candidates = ", ".join(
-                f"{u.get('username')} ({u.get('_id', '?')})" for u in exact
-            )
-            return tool_error(
-                f"Username '{username}' is ambiguous — "
-                f"multiple exact matches: {candidates}"
-            )
-        else:
-            # No exact match; show fuzzy candidates so the user can refine.
-            candidates = ", ".join(
-                f"{u.get('username')} ({u.get('_id', '?')})" for u in users
-            )
-            return tool_error(
-                f"User '{username}' not found. "
-                f"Similar users: {candidates}"
-            )
-
-    name = str(args.get("name") or "").strip()
-
-    try:
-        result = await client.create_group(uids, name=name)
-        return tool_result(result)
-    except Exception as exc:
-        return tool_error(f"Failed to create group: {exc}")
+    return await _runtime().create_group(args)
 
 
 async def _handle_create_topic(args: dict, **kw) -> str:
-    client = _get_eko_client()
-    if not client:
-        return tool_error("Eko adapter not connected")
-
-    # Defense in depth: config gate.
-    gate_err = _config_gate_error("create_topic")
-    if gate_err:
-        return tool_error(gate_err)
-
-    group_id = str(args.get("group_id") or "").strip()
-    name = str(args.get("name") or "").strip()
-
-    if not group_id:
-        return tool_error("group_id is required")
-    if not name:
-        return tool_error("name is required")
-
-    try:
-        result = await client.create_topic(group_id, name)
-        return tool_result(result)
-    except Exception as exc:
-        return tool_error(f"Failed to create topic: {exc}")
+    return await _runtime().create_topic(args)
 
 
 async def _handle_query_users(args: dict, **kw) -> str:
-    client = _get_eko_client()
-    if not client:
-        return tool_error("Eko adapter not connected")
-
-    # Defense in depth: config gate.
-    gate_err = _config_gate_error("query_users")
-    if gate_err:
-        return tool_error(gate_err)
-
-    username = str(args.get("username") or "").strip()
-    if not username:
-        return tool_error("username is required")
-
-    try:
-        result = await client.query_users(username)
-        return tool_result(result)
-    except Exception as exc:
-        return tool_error(f"Failed to query users: {exc}")
+    return await _runtime().query_users(args)
 
 
 # ---------------------------------------------------------------------------
