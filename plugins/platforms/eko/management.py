@@ -30,7 +30,12 @@ TOOL_TO_ACTION = {
 
 
 def get_connected_client() -> "_EkoClient | None":
-    """Return the ``_EkoClient`` from the running Eko adapter, or None."""
+    """Fallback client resolver — reaches through the gateway runner.
+
+ Only used when no client has been injected via ``set_client()``.
+ In normal gateway operation the adapter injects the client directly
+ at connection time, so this path is rarely hit.
+ """
     try:
         from gateway.run import _gateway_runner_ref
         from gateway.config import Platform as _Platform
@@ -105,6 +110,17 @@ class EkoManagementRuntime:
     def clear_client(self) -> None:
         """Clear the injected client (called by the adapter at disconnect time)."""
         self._client = None
+
+    def set_action_loader(
+        self, loader: Callable[[], Optional[List[str]]]
+    ) -> Optional[Callable[[], Optional[List[str]]]]:
+        """Override the action-allowlist loader.
+
+        Returns the previous loader so callers can restore it.
+        """
+        prev = self._action_loader
+        self._action_loader = loader
+        return prev
 
     def get_client(self) -> "_EkoClient | None":
         if self._client is not None:
@@ -244,6 +260,8 @@ class EkoManagementRuntime:
 # Module-level default runtime
 # ---------------------------------------------------------------------------
 
+# Process-global singleton: safe because each Hermes profile runs in its
+# own process. The adapter injects the client at connect time.
 _default_runtime = EkoManagementRuntime()
 
 

@@ -3216,17 +3216,54 @@ class _PatchManagementActions:
         self._original_loader = None
 
     def __enter__(self):
-        self._original_loader = self._runtime._action_loader
-        self._runtime._action_loader = lambda: self._return_value
+        self._original_loader = self._runtime.set_action_loader(
+            lambda: self._return_value
+        )
         return self
 
     def __exit__(self, *args):
-        self._runtime._action_loader = self._original_loader
+        self._runtime.set_action_loader(self._original_loader)
 
 
 def _patch_management_actions(return_value):
     """Override the action_loader on the default management runtime."""
     return _PatchManagementActions(return_value)
+
+
+class TestManagementRuntimeLifecycle:
+    """Direct tests for set_client/clear_client lifecycle."""
+
+    def test_set_then_get_client(self):
+        from plugins.platforms.eko.management import get_default_runtime
+        rt = get_default_runtime()
+        sentinel = object()
+        rt.set_client(sentinel)
+        try:
+            assert rt.get_client() is sentinel
+        finally:
+            rt.clear_client()
+
+    def test_clear_client_returns_none(self):
+        from plugins.platforms.eko.management import get_default_runtime
+        rt = get_default_runtime()
+        sentinel = object()
+        rt.set_client(sentinel)
+        rt.clear_client()
+        # After clear, get_client should fall through to the getter fallback.
+        # In a test env with no gateway runner, the fallback returns None.
+        assert rt.get_client() is None
+
+    def test_set_action_loader_round_trip(self):
+        from plugins.platforms.eko.management import get_default_runtime
+        rt = get_default_runtime()
+        original = rt._action_loader
+        sentinel = ["create_group"]
+        prev = rt.set_action_loader(lambda: sentinel)
+        try:
+            assert prev is original
+            assert rt._action_loader() == sentinel
+        finally:
+            rt.set_action_loader(prev)
 
 
 class TestManagementActionsConfigGate:
