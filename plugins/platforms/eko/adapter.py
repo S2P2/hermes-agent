@@ -141,47 +141,22 @@ class EkoAdapter(BasePlatformAdapter):
             raise RuntimeError("OutboundSender not initialized")
         return sender
 
-    # ------------------------------------------------------------------
-    # Config delegation — reads fall through to _eko_config.
-    # ------------------------------------------------------------------
 
-    _CONFIG_ATTRS = frozenset({
-        "base_url", "oauth_client_id", "oauth_client_secret",
-        "webhook_secret", "require_signature",
-        "webhook_host", "webhook_port", "webhook_path",
-        "allow_all", "allowed_users",
-        "allow_all_groups", "allowed_groups", "allowed_topics",
-        "require_mention", "mention_triggers",
-        "reply_token_ttl", "message_max_chars",
-        "max_upload_bytes", "max_inbound_media_bytes",
-    })
-
-    def __getattr__(self, name: str):
-        if name in self._CONFIG_ATTRS:
-            try:
-                cfg = self.__dict__["_eko_config"]
-            except KeyError:
-                raise AttributeError(name)
-            # Map legacy "allow_all" to EkoConfig's "allow_all_users"
-            cfg_name = "allow_all_users" if name == "allow_all" else name
-            return getattr(cfg, cfg_name)
-        raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{name}'"
-        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self) -> bool:
-        if not self.base_url:
+        cfg = self._eko_config
+        if not cfg.base_url:
             self._set_fatal_error(
                 "config_missing",
                 "EKO_BASE_URL must be set",
                 retryable=False,
             )
             return False
-        if not self.oauth_client_id or not self.oauth_client_secret:
+        if not cfg.oauth_client_id or not cfg.oauth_client_secret:
             self._set_fatal_error(
                 "config_missing",
                 "EKO_OAUTH_CLIENT_ID and EKO_OAUTH_CLIENT_SECRET must be set",
@@ -190,9 +165,9 @@ class EkoAdapter(BasePlatformAdapter):
             return False
 
         self._client = _EkoClient(
-            base_url=self.base_url,
-            client_id=self.oauth_client_id,
-            client_secret=self.oauth_client_secret,
+            base_url=cfg.base_url,
+            client_id=cfg.oauth_client_id,
+            client_secret=cfg.oauth_client_secret,
         )
         self._get_sender()._client = self._client
 
@@ -219,16 +194,16 @@ class EkoAdapter(BasePlatformAdapter):
             return False
 
         self._app = web.Application(client_max_size=WEBHOOK_BODY_MAX_BYTES)
-        self._app.router.add_post(self.webhook_path, self._handle_webhook)
+        self._app.router.add_post(cfg.webhook_path, self._handle_webhook)
         self._app.router.add_get(
-            f"{self.webhook_path}/health", self._handle_health
+            f"{cfg.webhook_path}/health", self._handle_health
         )
 
         self._runner = web.AppRunner(self._app)
         try:
             await self._runner.setup()
             self._site = web.TCPSite(
-                self._runner, self.webhook_host, self.webhook_port
+                self._runner, cfg.webhook_host, cfg.webhook_port
             )
             await self._site.start()
         except Exception as exc:
@@ -242,7 +217,7 @@ class EkoAdapter(BasePlatformAdapter):
             self._site = None
             self._set_fatal_error(
                 "bind_failed",
-                f"Could not start Eko webhook on {self.webhook_host}:{self.webhook_port}: {exc}",
+                f"Could not start Eko webhook on {cfg.webhook_host}:{cfg.webhook_port}: {exc}",
                 retryable=True,
             )
             return False
@@ -250,9 +225,9 @@ class EkoAdapter(BasePlatformAdapter):
         self._mark_connected()
         logger.info(
             "Eko: webhook listening on %s:%s%s",
-            self.webhook_host,
-            self.webhook_port,
-            self.webhook_path,
+            cfg.webhook_host,
+            cfg.webhook_port,
+            cfg.webhook_path,
         )
         return True
 
@@ -298,7 +273,7 @@ class EkoAdapter(BasePlatformAdapter):
         # EKO_REQUIRE_SIGNATURE=false.
         sig_header = request.headers.get("x-eko-signature", "")
         if not sig_header:
-            if self.require_signature:
+            if self._eko_config.require_signature:
                 logger.warning("Eko: missing X-Eko-Signature — rejecting webhook")
                 return web.Response(status=401, text="missing signature")
             logger.debug("Eko: no X-Eko-Signature header — skipping verification")
@@ -351,7 +326,7 @@ class EkoAdapter(BasePlatformAdapter):
     async def _handle_message_event(self, event: Dict[str, Any]) -> None:
         normalized = await normalize_message_event(
             event,
-            require_mention=getattr(self, "require_mention", False),
+            require_mention=self._eko_config.require_mention,
             allow_source=self._allowed_for_source,
             allow_group=self._allowed_group,
             has_mention_trigger=self._has_mention_trigger,
@@ -378,7 +353,7 @@ class EkoAdapter(BasePlatformAdapter):
         if normalized.chat_id and normalized.reply_token:
             self._reply_tokens[normalized.chat_id] = (
                 normalized.reply_token,
-                time.time() + self.reply_token_ttl,
+                time.time() + self._eko_config.reply_token_ttl,
             )
 
         source_obj = self.build_source(**(normalized.source_kwargs or {}))
@@ -399,7 +374,7 @@ class EkoAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("Eko: failed to download picture %s: %s", picture_id, exc)
             return None
-        max_inbound = getattr(self, 'max_inbound_media_bytes', DEFAULT_MAX_INBOUND_MEDIA_BYTES)
+        max_inbound = self._eko_config.max_inbound_media_bytes
         if max_inbound and len(data) > max_inbound:
             logger.warning(
                 "Eko: inbound picture %s too large (%d bytes, limit %d)",
@@ -439,36 +414,12 @@ class EkoAdapter(BasePlatformAdapter):
         uid = source.get("userId") or source.get("uid", "")
         if not uid:
             return False
-        cfg = self.__dict__.get("_eko_config")
-        if cfg is not None and "allow_all" not in self.__dict__ and "allowed_users" not in self.__dict__:
-            return cfg.is_user_allowed(uid)
-        try:
-            allow_all = self.allow_all
-        except AttributeError:
-            # Some tests construct partially-initialized adapters with
-            # __new__ and exercise message handling directly. Production
-            # instances always have config; unconfigured test doubles should
-            # preserve the historical default of allowing the message through.
-            return True
-        if allow_all:
-            return True
-        return uid in self.allowed_users
+        return self._eko_config.is_user_allowed(uid)
 
     def _allowed_group(self, group_id: str, topic_id: str = "") -> bool:
         """Check if a group/topic is in the allowlist (#26)."""
-        cfg = self.__dict__.get("_eko_config")
-        if cfg is not None and not any(
-            key in self.__dict__
-            for key in ("allow_all_groups", "allowed_groups", "allowed_topics")
-        ):
-            return cfg.is_topic_allowed(group_id, topic_id) if topic_id else cfg.is_group_allowed(group_id)
-        if self.allow_all_groups:
-            return True
-        if group_id in self.allowed_groups:
-            return True
-        if topic_id and f"{group_id}:{topic_id}" in self.allowed_topics:
-            return True
-        return False
+        cfg = self._eko_config
+        return cfg.is_topic_allowed(group_id, topic_id) if topic_id else cfg.is_group_allowed(group_id)
 
     def _has_mention_trigger(self, text: str) -> bool:
         """Check if text contains an @mention trigger (#22).
@@ -487,7 +438,7 @@ class EkoAdapter(BasePlatformAdapter):
                     return True
                 idx = text.find("@all", idx + 1)
 
-        triggers = self.mention_triggers or ["Hermes Agent"]
+        triggers = self._eko_config.mention_triggers or ["Hermes Agent"]
         for trigger in triggers:
             # Case-sensitive: look for @trigger in text.
             needle = "@" + trigger
@@ -662,7 +613,7 @@ class EkoAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Eko adapter not connected")
 
-        chunks = self.truncate_message(content, self.message_max_chars)
+        chunks = self.truncate_message(content, self._eko_config.message_max_chars)
         if not chunks:
             return SendResult(success=True)
 
@@ -684,10 +635,6 @@ class EkoAdapter(BasePlatformAdapter):
             if not last_result.success:
                 return last_result
         return last_result
-
-    def _get_routing(self, chat_id: str) -> Optional[Dict[str, str]]:
-        """Return routing metadata for a chat_id, or None."""
-        return self._session_routing.get(chat_id) if hasattr(self, '_session_routing') else None
 
     # ------------------------------------------------------------------
     # Outbound send (images and files)
@@ -716,7 +663,7 @@ class EkoAdapter(BasePlatformAdapter):
                 if not self._get_sender().check_size(file_size):
                     return SendResult(
                         success=False,
-                        error=f"Image file too large ({file_size} bytes, limit {self.max_upload_bytes})",
+                        error=f"Image file too large ({file_size} bytes, limit {self._eko_config.max_upload_bytes})",
                     )
             except OSError:
                 pass  # stat failed; let read_bytes try
@@ -785,7 +732,7 @@ class EkoAdapter(BasePlatformAdapter):
                 if not self._get_sender().check_size(file_size):
                     return SendResult(
                         success=False,
-                        error=f"File too large ({file_size} bytes, limit {self.max_upload_bytes})",
+                        error=f"File too large ({file_size} bytes, limit {self._eko_config.max_upload_bytes})",
                     )
             except OSError:
                 pass  # stat failed; let read_bytes try
@@ -827,14 +774,15 @@ class EkoAdapter(BasePlatformAdapter):
         - An optional ``sha256=`` prefix is stripped so proxy-added
           prefixes still verify against the raw Base64 digest.
         """
-        if not self.webhook_secret:
+        secret = self._eko_config.webhook_secret
+        if not secret:
             return False
         sig = signature.strip()
         if sig.lower().startswith("sha256="):
             sig = sig[7:]
         expected = base64.b64encode(
             hmac.new(
-                self.webhook_secret.encode("utf-8"),
+                secret.encode("utf-8"),
                 body,
                 hashlib.sha256,
             ).digest()
@@ -845,7 +793,7 @@ class EkoAdapter(BasePlatformAdapter):
         """No-op - Eko has no documented typing indicator API."""
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        routing = self._get_routing(chat_id)
+        routing = self._session_routing.get(chat_id)
         if routing and routing.get("groupId"):
             group_id = routing.get("groupId", "")
             topic_id = routing.get("topicId", "")
@@ -950,7 +898,7 @@ async def _standalone_send(
             if _runner:
                 _adapter = _runner.adapters.get(_Platform("eko"))
                 if _adapter:
-                    routing = _adapter._get_routing(chat_id) if hasattr(_adapter, "_get_routing") else None
+                    routing = _adapter._session_routing.get(chat_id)
                     if routing:
                         session_routing[chat_id] = routing
         except Exception:
