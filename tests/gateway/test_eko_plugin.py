@@ -74,7 +74,7 @@ def make_test_adapter(**overrides):
     adapter._client = overrides.pop("_client", None)
     adapter._bot_user_id = overrides.pop("_bot_user_id", None)
 
-    # Build a real EkoConfig so _get_sender() and __getattr__ work without
+    # Build a real EkoConfig so _get_sender() works without
     # test-only reconstruction logic.
     from plugins.platforms.eko.config import EkoConfig as _EC
     from plugins.platforms.eko.outbound import OutboundSender as _OS
