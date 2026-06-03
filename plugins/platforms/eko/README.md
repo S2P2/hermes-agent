@@ -273,6 +273,10 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 ## Version History
 
+### v1.10.0
+
+- **Deepened routing and management modules.** Extracted routing logic into dedicated helpers, improved group/topic resolution for edge cases (DM-type groups with topics, standalone routing fallbacks), and hardened management tool error handling. Internal refactor — no new env vars or config keys.
+
 ### v1.9.0
 
 - **Quick replies for interactive prompts.** Clarify choices, slash confirmations, and dangerous-command approvals render as Eko quick-reply buttons via `/bot/v1/message/quickreply` when a reply token is available. Button `value` fields use slash commands (`/approve`, `/deny`, etc.) so taps bypass the agent-active message queue. Falls back to plain text when no token is available (PR #53).
@@ -364,7 +368,7 @@ None currently.
 
 | Feature | Description | Notes |
 |---------|-------------|-------|
-| Compact tool progress | One-shot progress message on no-edit platforms | Issue #32 (pended — core gateway change) |
+| ~~Compact tool progress~~ | One-shot progress message on no-edit platforms | Issue #32 ✅ (PR #59 — core gateway change, not Eko-specific) |
 
 ### Low priority
 
