@@ -36,65 +36,11 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-# Load EkoConfig — same fallback pattern as _EkoClient below.
-try:
-    from .config import EkoConfig  # noqa: F401
-except ImportError:
-    import importlib.util as _ilu_config
-    import sys as _sys_config
-    from pathlib import Path as _Path_config
+from .config import EkoConfig
 
-    _cfg_path = _Path_config(__file__).with_name("config.py")
-    _cfg_spec = _ilu_config.spec_from_file_location(
-        "plugins.platforms.eko.config", _cfg_path
-    )
-    if _cfg_spec and _cfg_spec.loader:
-        _cfg_mod = _ilu_config.module_from_spec(_cfg_spec)
-        _sys_config.modules["plugins.platforms.eko.config"] = _cfg_mod
-        _cfg_spec.loader.exec_module(_cfg_mod)
-        EkoConfig = _cfg_mod.EkoConfig
-    else:
-        raise ImportError(f"Cannot load EkoConfig from {_cfg_path}")
+from .outbound import OutboundSender
 
-# Load OutboundSender — same fallback pattern.
-try:
-    from .outbound import OutboundSender  # noqa: F401
-except ImportError:
-    import importlib.util as _ilu_ob
-    import sys as _sys_ob
-    from pathlib import Path as _Path_ob
-
-    _ob_path = _Path_ob(__file__).with_name("outbound.py")
-    _ob_spec = _ilu_ob.spec_from_file_location(
-        "plugins.platforms.eko.outbound", _ob_path
-    )
-    if _ob_spec and _ob_spec.loader:
-        _ob_mod = _ilu_ob.module_from_spec(_ob_spec)
-        _sys_ob.modules["plugins.platforms.eko.outbound"] = _ob_mod
-        _ob_spec.loader.exec_module(_ob_mod)
-        OutboundSender = _ob_mod.OutboundSender
-    else:
-        raise ImportError(f"Cannot load OutboundSender from {_ob_path}")
-
-# Load inbound normalizer — same fallback pattern.
-try:
-    from .inbound import normalize_message_event  # noqa: F401
-except ImportError:
-    import importlib.util as _ilu_inbound
-    import sys as _sys_inbound
-    from pathlib import Path as _Path_inbound
-
-    _inbound_path = _Path_inbound(__file__).with_name("inbound.py")
-    _inbound_spec = _ilu_inbound.spec_from_file_location(
-        "plugins.platforms.eko.inbound", _inbound_path
-    )
-    if _inbound_spec and _inbound_spec.loader:
-        _inbound_mod = _ilu_inbound.module_from_spec(_inbound_spec)
-        _sys_inbound.modules["plugins.platforms.eko.inbound"] = _inbound_mod
-        _inbound_spec.loader.exec_module(_inbound_mod)
-        normalize_message_event = _inbound_mod.normalize_message_event
-    else:
-        raise ImportError(f"Cannot load inbound normalizer from {_inbound_path}")
+from .inbound import normalize_message_event
 
 logger = logging.getLogger(__name__)
 
@@ -127,27 +73,7 @@ DEFAULT_REPLY_TOKEN_TTL = 50
 
 
 
-# Re-export client class for backward compat within this package.
-try:
-    from .client import _EkoClient  # noqa: F401
-except ImportError:
-    # Test loader imports adapter.py as a standalone module
-    # (no package context), so relative import fails.
-    import importlib.util as _ilu
-    import sys as _sys
-    from pathlib import Path as _Path
-
-    _client_path = _Path(__file__).with_name("client.py")
-    _client_spec = _ilu.spec_from_file_location(
-        "plugins.platforms.eko.client", _client_path
-    )
-    if _client_spec and _client_spec.loader:
-        _client_mod = _ilu.module_from_spec(_client_spec)
-        _sys.modules["plugins.platforms.eko.client"] = _client_mod
-        _client_spec.loader.exec_module(_client_mod)
-        _EkoClient = _client_mod._EkoClient
-    else:
-        raise ImportError(f"Cannot load _EkoClient from {_client_path}")
+from .client import _EkoClient
 
 
 # ---------------------------------------------------------------------------
@@ -209,56 +135,14 @@ class EkoAdapter(BasePlatformAdapter):
         )
 
     def _get_sender(self) -> OutboundSender:
-        """Lazily create OutboundSender (test helpers use __new__)."""
+        """Return the outbound sender. Must be initialized by ``__init__`` or the test factory."""
         sender = self.__dict__.get("_sender")
-        if sender is not None:
-            return sender
-        # Build from whatever attributes are available (test helpers
-        # use __new__ + direct attr assignment).
-        from plugins.platforms.eko.config import EkoConfig as _EC
-        base_cfg = self.__dict__.get("_eko_config") or _EC()
-        # Test helpers may have set config attrs directly on __dict__;
-        # layer them on top of the base config.
-        overrides = {}
-        for key in (
-            "max_upload_bytes", "max_inbound_media_bytes",
-            "message_max_chars", "reply_token_ttl",
-        ):
-            val = self.__dict__.get(key)
-            if val is not None:
-                overrides[key] = val
-        cfg = _EC(
-            base_url=base_cfg.base_url,
-            oauth_client_id=base_cfg.oauth_client_id,
-            oauth_client_secret=base_cfg.oauth_client_secret,
-            webhook_host=base_cfg.webhook_host,
-            webhook_port=base_cfg.webhook_port,
-            webhook_path=base_cfg.webhook_path,
-            webhook_secret=base_cfg.webhook_secret,
-            require_signature=base_cfg.require_signature,
-            message_max_chars=overrides.get("message_max_chars", base_cfg.message_max_chars),
-            max_upload_bytes=overrides.get("max_upload_bytes", base_cfg.max_upload_bytes),
-            max_inbound_media_bytes=overrides.get("max_inbound_media_bytes", base_cfg.max_inbound_media_bytes),
-            reply_token_ttl=overrides.get("reply_token_ttl", base_cfg.reply_token_ttl),
-            allowed_users=base_cfg.allowed_users,
-            allowed_groups=base_cfg.allowed_groups,
-            allowed_topics=base_cfg.allowed_topics,
-            allow_all_users=base_cfg.allow_all_users,
-            allow_all_groups=base_cfg.allow_all_groups,
-            require_mention=base_cfg.require_mention,
-            mention_triggers=base_cfg.mention_triggers,
-        ) if overrides else base_cfg
-        client = self.__dict__.get("_client")
-        sr = self.__dict__.get("_session_routing") or {}
-        rt = self.__dict__.get("_reply_tokens") or {}
-        sender = OutboundSender(config=cfg, client=client, session_routing=sr, reply_tokens=rt)
-        self._sender = sender
+        if sender is None:
+            raise RuntimeError("OutboundSender not initialized")
         return sender
 
     # ------------------------------------------------------------------
-    # Config delegation — reads fall through to _eko_config, writes
-    # land on self.__dict__ (backward compat for test helpers that
-    # use __new__ + direct attr assignment).
+    # Config delegation — reads fall through to _eko_config.
     # ------------------------------------------------------------------
 
     _CONFIG_ATTRS = frozenset({
@@ -801,35 +685,9 @@ class EkoAdapter(BasePlatformAdapter):
                 return last_result
         return last_result
 
-    def _resolve_uid(self, chat_id: str) -> str:
-        """Resolve the Eko user uid for push delivery.
-
-        chat_id may be a sessionId (groupId_topicId) or a plain uid.
-        """
-        routing = self._session_routing.get(chat_id) if hasattr(self, '_session_routing') else None
-        if routing:
-            return routing.get("uid", chat_id)
-        return chat_id
-
     def _get_routing(self, chat_id: str) -> Optional[Dict[str, str]]:
         """Return routing metadata for a chat_id, or None."""
         return self._session_routing.get(chat_id) if hasattr(self, '_session_routing') else None
-
-    def _is_group_chat(self, chat_id: str) -> bool:
-        """Check if chat_id maps to a group/topic (not a bare DM uid).
-
-        Returns True when the routing metadata has both groupId and topicId,
-        meaning the conversation is within a group+topic context that requires
-        the ``/bot/v1/group/*`` endpoints — regardless of ``groupType``.
-        Eko sets ``groupType: "direct_chat"`` even for topics inside DM-type
-        groups, so we cannot rely on it to distinguish DM from topic routing.
-        """
-        routing = self._get_routing(chat_id)
-        return bool(
-            routing
-            and routing.get("groupId")
-            and routing.get("topicId")
-        )
 
     # ------------------------------------------------------------------
     # Outbound send (images and files)

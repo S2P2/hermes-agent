@@ -57,6 +57,72 @@ def _make_config(extra=None):
     return cfg
 
 
+def make_test_adapter(**overrides):
+    """Create an EkoAdapter with sensible test defaults.
+
+    Bypasses ``__init__`` (which requires real config/gateway objects)
+    and sets every attribute tests commonly need.  Pass keyword
+    arguments to override any default.
+    """
+    adapter = EkoAdapter.__new__(EkoAdapter)
+    # Core runtime state
+    reply_tokens = overrides.pop("_reply_tokens", {})
+    session_routing = overrides.pop("_session_routing", {})
+    adapter._reply_tokens = reply_tokens
+    adapter._session_routing = session_routing
+    adapter._dedup = _MessageDeduplicator()
+    adapter._client = overrides.pop("_client", None)
+    adapter._bot_user_id = overrides.pop("_bot_user_id", None)
+
+    # Build a real EkoConfig so _get_sender() and __getattr__ work without
+    # test-only reconstruction logic.
+    from plugins.platforms.eko.config import EkoConfig as _EC
+    from plugins.platforms.eko.outbound import OutboundSender as _OS
+    adapter._eko_config = _EC(
+        oauth_client_secret=overrides.pop("oauth_client_secret", ""),
+        allow_all_users=overrides.pop("allow_all", True),
+        allowed_users=overrides.pop("allowed_users", set()),
+        allow_all_groups=overrides.pop("allow_all_groups", True),
+        allowed_groups=overrides.pop("allowed_groups", set()),
+        allowed_topics=overrides.pop("allowed_topics", set()),
+        require_mention=overrides.pop("require_mention", False),
+        mention_triggers=overrides.pop("mention_triggers", []),
+        reply_token_ttl=overrides.pop("reply_token_ttl", 50),
+        message_max_chars=overrides.pop("message_max_chars", 50_000),
+        max_upload_bytes=overrides.pop("max_upload_bytes", 10_485_760),
+        max_inbound_media_bytes=overrides.pop("max_inbound_media_bytes", 10_485_760),
+        webhook_secret=overrides.pop("webhook_secret", ""),
+        require_signature=overrides.pop("require_signature", False),
+    )
+
+    # Build the OutboundSender so _get_sender() has nothing to reconstruct.
+    sender = overrides.pop("_sender", None)
+    if sender is None:
+        sender = _OS(
+            config=adapter._eko_config,
+            client=adapter._client,
+            session_routing=session_routing,
+            reply_tokens=reply_tokens,
+        )
+    adapter._sender = sender
+
+    # BasePlatformAdapter / common mocks
+    adapter.platform = overrides.pop("platform", Platform("eko"))
+    adapter.handle_message = overrides.pop("handle_message", AsyncMock())
+    adapter.truncate_message = overrides.pop("truncate_message", BasePlatformAdapter.truncate_message)
+    adapter.config = overrides.pop("config", _make_config())
+
+    # Runtime flags
+    adapter._message_handler = overrides.pop("_message_handler", None)
+    adapter._running = overrides.pop("_running", False)
+
+    # Any remaining overrides
+    for key, value in overrides.items():
+        setattr(adapter, key, value)
+
+    return adapter
+
+
 # ---------------------------------------------------------------------------
 # 1. Dedup
 # ---------------------------------------------------------------------------
@@ -93,34 +159,24 @@ class TestDedup:
 class TestAllowlist:
 
     def test_allow_all_permits(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.allow_all = True
-        adapter.allowed_users = set()
+        adapter = make_test_adapter(allow_all=True, allowed_users=set())
         assert adapter._allowed_for_source({"userId": "anyone"})
 
     def test_allowed_user_passes(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.allow_all = False
-        adapter.allowed_users = {"user123"}
+        adapter = make_test_adapter(allow_all=False, allowed_users={"user123"})
         assert adapter._allowed_for_source({"userId": "user123"})
 
     def test_disallowed_user_rejected(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.allow_all = False
-        adapter.allowed_users = {"user123"}
+        adapter = make_test_adapter(allow_all=False, allowed_users={"user123"})
         assert not adapter._allowed_for_source({"userId": "stranger"})
 
     def test_uid_field_also_checked(self):
         """Eko sources may use 'uid' instead of 'userId'."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.allow_all = False
-        adapter.allowed_users = {"abc123"}
+        adapter = make_test_adapter(allow_all=False, allowed_users={"abc123"})
         assert adapter._allowed_for_source({"uid": "abc123"})
 
     def test_empty_uid_rejected(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.allow_all = False
-        adapter.allowed_users = set()
+        adapter = make_test_adapter(allow_all=False, allowed_users=set())
         assert not adapter._allowed_for_source({})
 
 
@@ -132,19 +188,13 @@ class TestRequireMention:
     """Issue #22: require_mention filter for group chats."""
 
     def _make_adapter(self, **overrides):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.require_mention = overrides.get("require_mention", False)
-        adapter.mention_triggers = overrides.get("mention_triggers", [])
-        adapter.allow_all_groups = overrides.get("allow_all_groups", True)
-        adapter.allowed_groups = overrides.get("allowed_groups", set())
-        adapter.allowed_topics = overrides.get("allowed_topics", set())
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._bot_user_id = None
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
-        return adapter
+        return make_test_adapter(
+            require_mention=overrides.get("require_mention", False),
+            mention_triggers=overrides.get("mention_triggers", []),
+            allow_all_groups=overrides.get("allow_all_groups", True),
+            allowed_groups=overrides.get("allowed_groups", set()),
+            allowed_topics=overrides.get("allowed_topics", set()),
+        )
 
     def _group_text_event(self, text, group_id="g1", topic_id="t1"):
         return {
@@ -297,22 +347,15 @@ class TestContextAwareAllowlist:
     """Issue #54: allowlists apply to the Eko conversation context."""
 
     def _make_adapter(self, **overrides):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._dedup = _MessageDeduplicator()
-        adapter._bot_user_id = None
-        adapter.allow_all = overrides.get("allow_all", False)
-        adapter.allowed_users = overrides.get("allowed_users", set())
-        adapter.allow_all_groups = overrides.get("allow_all_groups", False)
-        adapter.allowed_groups = overrides.get("allowed_groups", set())
-        adapter.allowed_topics = overrides.get("allowed_topics", set())
-        adapter.require_mention = False
-        adapter.mention_triggers = []
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
-        return adapter
+        return make_test_adapter(
+            allow_all=overrides.get("allow_all", False),
+            allowed_users=overrides.get("allowed_users", set()),
+            allow_all_groups=overrides.get("allow_all_groups", False),
+            allowed_groups=overrides.get("allowed_groups", set()),
+            allowed_topics=overrides.get("allowed_topics", set()),
+            require_mention=False,
+            mention_triggers=[],
+        )
 
     def _message_event(self, *, user_id="u1", group_id="", topic_id=""):
         message = {
@@ -387,19 +430,13 @@ class TestGroupAllowlist:
     """Issue #26: group/topic allowlist controls."""
 
     def _make_adapter(self, **overrides):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.allow_all_groups = overrides.get("allow_all_groups", True)
-        adapter.allowed_groups = overrides.get("allowed_groups", set())
-        adapter.allowed_topics = overrides.get("allowed_topics", set())
-        adapter.require_mention = overrides.get("require_mention", False)
-        adapter.mention_triggers = overrides.get("mention_triggers", [])
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._bot_user_id = None
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
-        return adapter
+        return make_test_adapter(
+            allow_all_groups=overrides.get("allow_all_groups", True),
+            allowed_groups=overrides.get("allowed_groups", set()),
+            allowed_topics=overrides.get("allowed_topics", set()),
+            require_mention=overrides.get("require_mention", False),
+            mention_triggers=overrides.get("mention_triggers", []),
+        )
 
     def _group_event(self, group_id="g1", topic_id="t1", group_type="group"):
         return {
@@ -525,19 +562,13 @@ class TestFiltersCompose:
     """Both require_mention (#22) and group allowlist (#26) must compose."""
 
     def _make_adapter(self, **overrides):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.require_mention = overrides.get("require_mention", False)
-        adapter.mention_triggers = overrides.get("mention_triggers", [])
-        adapter.allow_all_groups = overrides.get("allow_all_groups", True)
-        adapter.allowed_groups = overrides.get("allowed_groups", set())
-        adapter.allowed_topics = overrides.get("allowed_topics", set())
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._bot_user_id = None
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
-        return adapter
+        return make_test_adapter(
+            require_mention=overrides.get("require_mention", False),
+            mention_triggers=overrides.get("mention_triggers", []),
+            allow_all_groups=overrides.get("allow_all_groups", True),
+            allowed_groups=overrides.get("allowed_groups", set()),
+            allowed_topics=overrides.get("allowed_topics", set()),
+        )
 
     def _group_event(self, text="hello", group_id="g1", topic_id="t1"):
         return {
@@ -608,16 +639,13 @@ class TestFiltersCompose:
 class TestReplyTokenStash:
 
     def test_no_token_returns_empty(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
+        adapter = make_test_adapter()
         token, used = adapter._consume_reply_token("chat1")
         assert token == ""
         assert not used
 
     def test_fresh_token_consumed(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter = make_test_adapter(_reply_tokens={"chat1": ("tok_abc", time.time() + 50)})
         token, used = adapter._consume_reply_token("chat1")
         assert token == "tok_abc"
         assert used
@@ -625,8 +653,7 @@ class TestReplyTokenStash:
         assert adapter._consume_reply_token("chat1") == ("", False)
 
     def test_expired_token_not_consumed(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_expired", time.time() - 1)}
+        adapter = make_test_adapter(_reply_tokens={"chat1": ("tok_expired", time.time() - 1)})
         token, used = adapter._consume_reply_token("chat1")
         assert token == ""
         assert not used
@@ -640,13 +667,8 @@ class TestSendRouting:
 
     @staticmethod
     def _make_routing_adapter(**overrides):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = overrides.get("_reply_tokens", {})
-        adapter._session_routing = overrides.get("_session_routing", {})
-        adapter._client = overrides.get("_client", MagicMock())
-        adapter.message_max_chars = overrides.get("message_max_chars", 50_000)
-        adapter.truncate_message = BasePlatformAdapter.truncate_message
-        return adapter
+        overrides.setdefault("_client", MagicMock())
+        return make_test_adapter(**overrides)
 
     @pytest.mark.asyncio
     async def test_reply_token_used_first(self):
@@ -725,8 +747,7 @@ class TestSendRouting:
 
     @pytest.mark.asyncio
     async def test_not_connected_returns_error(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._client = None
+        adapter = make_test_adapter(_client=None)
         result = await adapter.send("chat1", "hello")
         assert not result.success
         assert "not connected" in result.error
@@ -740,9 +761,10 @@ class TestExecApprovalQuickReplies:
 
     @pytest.mark.asyncio
     async def test_send_exec_approval_uses_quick_reply_with_reply_token(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+        adapter = make_test_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(reply_quick_reply=AsyncMock()),
+        )
 
         result = await adapter.send_exec_approval(
             chat_id="chat1",
@@ -773,9 +795,7 @@ class TestExecApprovalQuickReplies:
 
     @pytest.mark.asyncio
     async def test_send_exec_approval_without_reply_token_uses_text_fallback(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+        adapter = make_test_adapter(_client=MagicMock(reply_quick_reply=AsyncMock()))
 
         result = await adapter.send_exec_approval(
             chat_id="chat1",
@@ -791,9 +811,10 @@ class TestSlashConfirmQuickReplies:
 
     @pytest.mark.asyncio
     async def test_send_slash_confirm_uses_quick_reply_with_reply_token(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+        adapter = make_test_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(reply_quick_reply=AsyncMock()),
+        )
 
         result = await adapter.send_slash_confirm(
             chat_id="chat1",
@@ -814,9 +835,7 @@ class TestSlashConfirmQuickReplies:
 
     @pytest.mark.asyncio
     async def test_send_slash_confirm_without_reply_token_uses_text_fallback(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+        adapter = make_test_adapter(_client=MagicMock(reply_quick_reply=AsyncMock()))
 
         result = await adapter.send_slash_confirm(
             chat_id="chat1",
@@ -839,9 +858,10 @@ class TestClarifyQuickReplies:
         cm.clear_session("sk-eko")
         cm.register("cid-eko", "sk-eko", "Pick one?", ["A", "B"])
 
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock(reply_quick_reply=AsyncMock())
+        adapter = make_test_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(reply_quick_reply=AsyncMock()),
+        )
 
         try:
             result = await adapter.send_clarify(
@@ -871,14 +891,12 @@ class TestClarifyQuickReplies:
 class TestSendChunking:
 
     def _make_adapter(self, max_chars: int = 10) -> EkoAdapter:
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._client = MagicMock()
+        adapter = make_test_adapter(
+            _client=MagicMock(),
+            message_max_chars=max_chars,
+        )
         adapter._client.push_text = AsyncMock()
         adapter._client.reply_text = AsyncMock()
-        adapter.message_max_chars = max_chars
-        adapter.truncate_message = BasePlatformAdapter.truncate_message
         return adapter
 
     @pytest.mark.asyncio
@@ -900,7 +918,7 @@ class TestSendChunking:
     @pytest.mark.asyncio
     async def test_first_chunk_uses_reply_token(self):
         adapter = self._make_adapter(max_chars=10)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
+        adapter._reply_tokens["chat1"] = ("tok_abc", time.time() + 50)
         long_text = "hello world and more text here"
         result = await adapter.send("chat1", long_text)
         assert result.success
@@ -1001,10 +1019,7 @@ class TestSignatureVerification:
         ).decode("utf-8")
 
     def _make_adapter(self, secret: str = "my_oauth_secret") -> EkoAdapter:
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.oauth_client_secret = secret
-        adapter.webhook_secret = secret
-        return adapter
+        return make_test_adapter(oauth_client_secret=secret, webhook_secret=secret)
 
     def test_valid_signature_passes(self):
         adapter = self._make_adapter("my_oauth_secret")
@@ -1040,9 +1055,7 @@ class TestSignatureVerification:
 
     def test_separate_webhook_secret_used(self):
         """EKO_WEBHOOK_SECRET overrides oauth_client_secret."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.oauth_client_secret = "oauth_secret"
-        adapter.webhook_secret = "webhook_secret"
+        adapter = make_test_adapter(oauth_client_secret="oauth_secret", webhook_secret="webhook_secret")
         body = b'{"events":[]}'
         sig = self._sign("webhook_secret", body)
         assert adapter._verify_signature(body, sig)
@@ -1052,9 +1065,7 @@ class TestSignatureVerification:
 
     def test_falls_back_to_oauth_secret(self):
         """When EKO_WEBHOOK_SECRET is empty, oauth_client_secret is used."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.oauth_client_secret = "oauth_secret"
-        adapter.webhook_secret = "oauth_secret"  # fallback kicks in during __init__
+        adapter = make_test_adapter(oauth_client_secret="oauth_secret", webhook_secret="oauth_secret")
         body = b'{"events":[]}'
         sig = self._sign("oauth_secret", body)
         assert adapter._verify_signature(body, sig)
@@ -1512,16 +1523,10 @@ class TestInboundPicture:
 
     @pytest.mark.asyncio
     async def test_picture_downloads_and_caches(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._client = MagicMock()
         fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
-        adapter._client.fetch_picture = AsyncMock(return_value=fake_png)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._bot_user_id = None
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
+        adapter = make_test_adapter(
+            _client=MagicMock(fetch_picture=AsyncMock(return_value=fake_png)),
+        )
 
         event = {
             "replyToken": "tok123",
@@ -1555,17 +1560,11 @@ class TestInboundPicture:
 
     @pytest.mark.asyncio
     async def test_picture_download_failure_falls_back_to_placeholder(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._client = MagicMock()
-        adapter._client.fetch_picture = AsyncMock(
-            side_effect=RuntimeError("download failed")
+        adapter = make_test_adapter(
+            _client=MagicMock(
+                fetch_picture=AsyncMock(side_effect=RuntimeError("download failed")),
+            ),
         )
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._bot_user_id = None
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
 
         event = {
             "replyToken": "tok123",
@@ -1588,13 +1587,7 @@ class TestInboundPicture:
 
     @pytest.mark.asyncio
     async def test_sticker_surfaces_placeholder(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._bot_user_id = None
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
+        adapter = make_test_adapter()
 
         event = {
             "replyToken": "tok123",
@@ -1622,10 +1615,10 @@ class TestOutboundMedia:
 
     @pytest.mark.asyncio
     async def test_send_image_file_uses_reply_token(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock()
-        adapter._client.reply_picture = AsyncMock()
+        adapter = make_test_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(reply_picture=AsyncMock()),
+        )
 
         with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
             result = await adapter.send_image_file("chat1", "/fake/img.png", caption="hi")
@@ -1635,11 +1628,7 @@ class TestOutboundMedia:
 
     @pytest.mark.asyncio
     async def test_send_image_file_falls_back_to_push(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._client = MagicMock()
-        adapter._client.push_picture = AsyncMock()
+        adapter = make_test_adapter(_client=MagicMock(push_picture=AsyncMock()))
 
         with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
             result = await adapter.send_image_file("chat1", "/fake/img.png", caption="hi")
@@ -1653,11 +1642,7 @@ class TestOutboundMedia:
 
     @pytest.mark.asyncio
     async def test_send_image_downloads_and_delegates(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._client = MagicMock()
-        adapter._client.push_picture = AsyncMock()
+        adapter = make_test_adapter(_client=MagicMock(push_picture=AsyncMock()))
 
         with patch("gateway.platforms.base.cache_image_from_url", AsyncMock(return_value="/cache/img_abc.jpg")):
             with patch("pathlib.Path.read_bytes", return_value=b"\xff\xd8\xff image data"):
@@ -1667,11 +1652,7 @@ class TestOutboundMedia:
 
     @pytest.mark.asyncio
     async def test_send_document_pushes_file(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._client = MagicMock()
-        adapter._client.push_file = AsyncMock()
+        adapter = make_test_adapter(_client=MagicMock(push_file=AsyncMock()))
 
         with patch("pathlib.Path.read_bytes", return_value=b"%PDF-1.4 data"):
             result = await adapter.send_document(
@@ -1686,11 +1667,13 @@ class TestOutboundMedia:
 
     @pytest.mark.asyncio
     async def test_send_image_file_auth_error_retries_push(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {"chat1": ("tok_abc", time.time() + 50)}
-        adapter._client = MagicMock()
-        adapter._client.reply_picture = AsyncMock(side_effect=RuntimeError("401"))
-        adapter._client.push_picture = AsyncMock()
+        adapter = make_test_adapter(
+            _reply_tokens={"chat1": ("tok_abc", time.time() + 50)},
+            _client=MagicMock(
+                reply_picture=AsyncMock(side_effect=RuntimeError("401")),
+                push_picture=AsyncMock(),
+            ),
+        )
 
         with patch("pathlib.Path.read_bytes", return_value=b"\x89PNG data"):
             result = await adapter.send_image_file("chat1", "/fake/img.png")
@@ -1699,8 +1682,7 @@ class TestOutboundMedia:
 
     @pytest.mark.asyncio
     async def test_send_document_not_connected_returns_error(self):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._client = None
+        adapter = make_test_adapter(_client=None)
         result = await adapter.send_document("chat1", "/fake/file.pdf")
         assert not result.success
 
@@ -1726,10 +1708,7 @@ def _mock_request(body: bytes, headers: dict | None = None):
 class TestWebhookSignaturePolicy:
 
     def _make_adapter(self, *, secret: str = "my_oauth_secret", require_signature: bool = True):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.webhook_secret = secret
-        adapter.require_signature = require_signature
-        return adapter
+        return make_test_adapter(webhook_secret=secret, require_signature=require_signature)
 
     @pytest.mark.asyncio
     async def test_missing_signature_rejected_by_default(self):
@@ -1773,9 +1752,7 @@ class TestWebhookSignaturePolicy:
 class TestWebhookSignatureNormalization:
 
     def _make_adapter(self, secret: str = "my_oauth_secret") -> EkoAdapter:
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter.webhook_secret = secret
-        return adapter
+        return make_test_adapter(webhook_secret=secret)
 
     def test_whitespace_is_trimmed(self):
         adapter = self._make_adapter()
@@ -1818,20 +1795,7 @@ class TestTopicRouting:
 
     @staticmethod
     def _make_adapter():
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._client = MagicMock()
-        adapter._bot_user_id = None
-        adapter.reply_token_ttl = 50
-        adapter.handle_message = AsyncMock()
-        adapter.platform = Platform("eko")
-        adapter.allow_all_groups = True
-        adapter.allowed_groups = set()
-        adapter.allowed_topics = set()
-        adapter.require_mention = False
-        adapter.mention_triggers = []
-        return adapter
+        return make_test_adapter(_client=MagicMock())
 
     @pytest.mark.asyncio
     async def test_dm_uses_session_id_as_chat_id(self):
@@ -2057,39 +2021,18 @@ class TestTopicRouting:
         assert "g1_t1" in adapter._reply_tokens
         assert "user_abc" not in adapter._reply_tokens
 
-    def test_resolve_uid_with_routing(self):
-        """_resolve_uid returns uid from routing metadata."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._session_routing = {
-            "g1_t1": {"uid": "user_abc", "groupId": "g1", "topicId": "t1"},
-        }
-        assert adapter._resolve_uid("g1_t1") == "user_abc"
-
-    def test_resolve_uid_without_routing_falls_back(self):
-        """_resolve_uid falls back to chat_id when no routing entry."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._session_routing = {}
-        assert adapter._resolve_uid("user_abc") == "user_abc"
-
-    def test_resolve_uid_without_attr_falls_back(self):
-        """_resolve_uid handles missing _session_routing attribute."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        assert adapter._resolve_uid("user_abc") == "user_abc"
-
     @pytest.mark.asyncio
     async def test_send_resolves_uid_for_push(self):
         """send() uses group endpoint when routing has groupId+topicId."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {
-            "g1_t1": {"uid": "user_abc", "groupId": "g1", "topicId": "t1"},
-        }
-        adapter._client = MagicMock(
-            push_group_text=AsyncMock(),
-            push_text=AsyncMock(),
+        adapter = make_test_adapter(
+            _session_routing={
+                "g1_t1": {"uid": "user_abc", "groupId": "g1", "topicId": "t1"},
+            },
+            _client=MagicMock(
+                push_group_text=AsyncMock(),
+                push_text=AsyncMock(),
+            ),
         )
-        adapter.message_max_chars = 50_000
-        adapter.truncate_message = BasePlatformAdapter.truncate_message
 
         result = await adapter.send("g1_t1", "hello")
         assert result.success
@@ -2313,50 +2256,18 @@ class TestStandaloneSend:
 class TestGroupSendRouting:
     """Tests for routing outbound sends to group/topic endpoints."""
 
-    def test_is_group_chat_dm_returns_false(self):
-        """Bare uid (no groupId/topicId) returns False for _is_group_chat."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._session_routing = {
-            "user1": {"uid": "user1", "groupId": "", "topicId": "", "groupType": "direct_chat"},
-        }
-        assert adapter._is_group_chat("user1") is False
-
-    def test_is_group_chat_topic_returns_true(self):
-        """Routing with groupId+topicId returns True even if groupType is direct_chat."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._session_routing = {
-            "g1_t1": {"uid": "u1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
-        }
-        assert adapter._is_group_chat("g1_t1") is True
-
-    def test_is_group_chat_team_returns_true(self):
-        """Team groupType with groupId+topicId returns True for _is_group_chat."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._session_routing = {
-            "g2_t2": {"uid": "u1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
-        }
-        assert adapter._is_group_chat("g2_t2") is True
-
-    def test_is_group_chat_unknown_returns_false(self):
-        """Unknown chat_id returns False for _is_group_chat."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._session_routing = {}
-        assert adapter._is_group_chat("unknown") is False
-
     @pytest.mark.asyncio
     async def test_send_text_uses_group_endpoint(self):
         """send() routes to push_group_text for team chat."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {
-            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
-        }
-        adapter._client = MagicMock(
-            push_group_text=AsyncMock(),
-            push_text=AsyncMock(),
+        adapter = make_test_adapter(
+            _session_routing={
+                "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+            },
+            _client=MagicMock(
+                push_group_text=AsyncMock(),
+                push_text=AsyncMock(),
+            ),
         )
-        adapter.message_max_chars = 50_000
-        adapter.truncate_message = BasePlatformAdapter.truncate_message
 
         result = await adapter.send("g2_t2", "hello group")
         assert result.success
@@ -2366,17 +2277,15 @@ class TestGroupSendRouting:
     @pytest.mark.asyncio
     async def test_send_text_dm_uses_direct_endpoint(self):
         """send() routes to push_text for bare uid (no groupId/topicId)."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {
-            "user_1": {"uid": "user_1", "groupId": "", "topicId": "", "groupType": "direct_chat"},
-        }
-        adapter._client = MagicMock(
-            push_group_text=AsyncMock(),
-            push_text=AsyncMock(),
+        adapter = make_test_adapter(
+            _session_routing={
+                "user_1": {"uid": "user_1", "groupId": "", "topicId": "", "groupType": "direct_chat"},
+            },
+            _client=MagicMock(
+                push_group_text=AsyncMock(),
+                push_text=AsyncMock(),
+            ),
         )
-        adapter.message_max_chars = 50_000
-        adapter.truncate_message = BasePlatformAdapter.truncate_message
 
         result = await adapter.send("user_1", "hello dm")
         assert result.success
@@ -2389,14 +2298,14 @@ class TestGroupSendRouting:
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG\r\nfake")
 
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {
-            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
-        }
-        adapter._client = MagicMock(
-            push_group_picture=AsyncMock(),
-            push_picture=AsyncMock(),
+        adapter = make_test_adapter(
+            _session_routing={
+                "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+            },
+            _client=MagicMock(
+                push_group_picture=AsyncMock(),
+                push_picture=AsyncMock(),
+            ),
         )
 
         result = await adapter.send_image_file("g2_t2", str(img))
@@ -2410,14 +2319,14 @@ class TestGroupSendRouting:
         doc = tmp_path / "report.pdf"
         doc.write_bytes(b"%PDF-fake")
 
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {
-            "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
-        }
-        adapter._client = MagicMock(
-            push_group_file=AsyncMock(),
-            push_file=AsyncMock(),
+        adapter = make_test_adapter(
+            _session_routing={
+                "g2_t2": {"uid": "user_1", "groupId": "g2", "topicId": "t2", "groupType": "team"},
+            },
+            _client=MagicMock(
+                push_group_file=AsyncMock(),
+                push_file=AsyncMock(),
+            ),
         )
 
         result = await adapter.send_document("g2_t2", str(doc))
@@ -2435,14 +2344,14 @@ class TestGroupSendRouting:
         doc = tmp_path / "notes.md"
         doc.write_bytes(b"# notes")
 
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {
-            "g1_t1": {"uid": "user_1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
-        }
-        adapter._client = MagicMock(
-            push_group_file=AsyncMock(),
-            push_file=AsyncMock(),
+        adapter = make_test_adapter(
+            _session_routing={
+                "g1_t1": {"uid": "user_1", "groupId": "g1", "topicId": "t1", "groupType": "direct_chat"},
+            },
+            _client=MagicMock(
+                push_group_file=AsyncMock(),
+                push_file=AsyncMock(),
+            ),
         )
 
         result = await adapter.send_document("g1_t1", str(doc))
@@ -2743,23 +2652,19 @@ class TestMediaSizeLimits:
     """Tests for upload and inbound media size limits."""
 
     def _make_adapter(self, max_upload=10_485_760, max_inbound=10_485_760):
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {}
-        adapter._client = MagicMock(
-            push_picture=AsyncMock(),
-            push_file=AsyncMock(),
-            push_group_picture=AsyncMock(),
-            push_group_file=AsyncMock(),
+        return make_test_adapter(
+            _client=MagicMock(
+                push_picture=AsyncMock(),
+                push_file=AsyncMock(),
+                push_group_picture=AsyncMock(),
+                push_group_file=AsyncMock(),
+            ),
+            message_max_chars=DEFAULT_MESSAGE_MAX_CHARS,
+            max_upload_bytes=max_upload,
+            max_inbound_media_bytes=max_inbound,
+            _message_handler=None,
+            _running=True,
         )
-        adapter.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
-        adapter.max_upload_bytes = max_upload
-        adapter.max_inbound_media_bytes = max_inbound
-        adapter.platform = Platform("eko")
-        adapter.config = _make_config()
-        adapter._message_handler = None
-        adapter._running = True
-        return adapter
 
     # -- Outbound: send_image_file --
 
@@ -2877,29 +2782,25 @@ class TestSendEkoMediaGroupRouting:
 
     def _make_group_adapter(self):
         """Create an EkoAdapter with group routing pre-configured."""
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._reply_tokens = {}
-        adapter._session_routing = {
-            "g1_t1": {
-                "uid": "user_1",
-                "groupId": "g1",
-                "topicId": "t1",
-                "groupType": "team",
+        return make_test_adapter(
+            _session_routing={
+                "g1_t1": {
+                    "uid": "user_1",
+                    "groupId": "g1",
+                    "topicId": "t1",
+                    "groupType": "team",
+                },
             },
-        }
-        adapter._client = MagicMock(
-            push_group_file=AsyncMock(),
-            push_file=AsyncMock(),
-            push_group_picture=AsyncMock(),
-            push_picture=AsyncMock(),
+            _client=MagicMock(
+                push_group_file=AsyncMock(),
+                push_file=AsyncMock(),
+                push_group_picture=AsyncMock(),
+                push_picture=AsyncMock(),
+            ),
+            message_max_chars=DEFAULT_MESSAGE_MAX_CHARS,
+            _message_handler=None,
+            _running=True,
         )
-        adapter.message_max_chars = DEFAULT_MESSAGE_MAX_CHARS
-        # BasePlatformAdapter attrs needed by send()
-        adapter.platform = Platform("eko")
-        adapter.config = _make_config()
-        adapter._message_handler = None
-        adapter._running = True
-        return adapter
 
     @pytest.mark.asyncio
     async def test_send_eko_media_routes_document_to_group(self, tmp_path):
@@ -3457,9 +3358,7 @@ class TestGetChatInfo:
 
     @staticmethod
     def _make_adapter():
-        adapter = EkoAdapter.__new__(EkoAdapter)
-        adapter._session_routing = {}
-        return adapter
+        return make_test_adapter(_session_routing={})
 
     @pytest.mark.asyncio
     async def test_unknown_chat_id_returns_dm(self):
