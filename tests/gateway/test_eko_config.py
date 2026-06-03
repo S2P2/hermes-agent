@@ -208,6 +208,29 @@ def test_topic_allowlist():
     assert cfg.is_topic_allowed("any", "any") is True
 
 
+def test_topic_in_allowed_group_is_allowed():
+    """Regression: topic messages accepted when the group is in allowed_groups.
+
+    EKO_ALLOWED_GROUPS=g1 should allow all topics under g1, even if no
+    gid:tid entries appear in EKO_ALLOWED_TOPICS.
+    """
+    from plugins.platforms.eko.config import EkoConfig
+
+    with patch.dict(
+        os.environ,
+        {
+            "EKO_ALLOW_ALL_GROUPS": "false",
+            "EKO_ALLOWED_GROUPS": "g1",
+            "EKO_ALLOWED_TOPICS": "",
+        },
+    ):
+        cfg = EkoConfig.from_env()
+
+    assert cfg.is_topic_allowed("g1", "t1") is True
+    assert cfg.is_topic_allowed("g1", "any-topic") is True
+    assert cfg.is_topic_allowed("g2", "t1") is False
+
+
 # ---------------------------------------------------------------------------
 # Test #8 — mention triggers default to ["Hermes Agent"]
 # ---------------------------------------------------------------------------
