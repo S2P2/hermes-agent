@@ -1605,6 +1605,26 @@ class TestInboundPicture:
         call_args = adapter.handle_message.call_args[0][0]
         assert call_args.text == "[sticker packageId=pkg1 stickerId=stk1]"
 
+    @pytest.mark.asyncio
+    async def test_sticker_without_ids_falls_back(self):
+        """Sticker events missing packageId/stickerId fall back to plain [sticker]."""
+        adapter = make_test_adapter()
+
+        event = {
+            "replyToken": "tok456",
+            "type": "message",
+            "source": {"type": "user", "userId": "user123", "username": "alice"},
+            "message": {
+                "id": "msg_sticker_bare",
+                "type": "sticker",
+            },
+            "timestamp": "2026-05-21T00:00:00.000Z",
+        }
+
+        await adapter._handle_message_event(event)
+        call_args = adapter.handle_message.call_args[0][0]
+        assert call_args.text == "[sticker]"
+
 
 # ---------------------------------------------------------------------------
 # 13. Outbound media (send_image_file, send_image, send_document)
@@ -3389,31 +3409,34 @@ class TestManagementActionsConfigGate:
 
     def test_load_config_filters_invalid_names(self):
         """Invalid action names are filtered out; valid ones are kept."""
-        from plugins.platforms.eko.management import load_management_actions_config
-        load_management_actions_config._cache_ts = 0.0
+        import sys
+        _mgmt_mod = sys.modules["plugins.platforms.eko.management"]
+        _mgmt_mod._mgmt_cache_ts = 0.0
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {"management_actions": ["create_group", "bogus", "query_users"]}
         with patch("plugins.platforms.eko.management.logger"), \
              patch("hermes_cli.config.load_config", return_value=mock_cfg):
-            result = load_management_actions_config()
+            result = _mgmt_mod.load_management_actions_config()
         assert result == ["create_group", "query_users"]
 
     def test_load_config_returns_none_when_unset(self):
-        from plugins.platforms.eko.management import load_management_actions_config
-        load_management_actions_config._cache_ts = 0.0
+        import sys
+        _mgmt_mod = sys.modules["plugins.platforms.eko.management"]
+        _mgmt_mod._mgmt_cache_ts = 0.0
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {}
         with patch("hermes_cli.config.load_config", return_value=mock_cfg):
-            result = load_management_actions_config()
+            result = _mgmt_mod.load_management_actions_config()
         assert result is None
 
     def test_load_config_comma_separated_string(self):
-        from plugins.platforms.eko.management import load_management_actions_config
-        load_management_actions_config._cache_ts = 0.0
+        import sys
+        _mgmt_mod = sys.modules["plugins.platforms.eko.management"]
+        _mgmt_mod._mgmt_cache_ts = 0.0
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {"management_actions": "create_group, query_users"}
         with patch("hermes_cli.config.load_config", return_value=mock_cfg):
-            result = load_management_actions_config()
+            result = _mgmt_mod.load_management_actions_config()
         assert result == ["create_group", "query_users"]
 
 

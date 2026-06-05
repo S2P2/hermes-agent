@@ -52,6 +52,11 @@ def get_connected_client() -> "_EkoClient | None":
     return None
 
 
+# Module-level TTL cache for load_management_actions_config().
+_mgmt_cache_val: Optional[List[str]] = None
+_mgmt_cache_ts: float = 0.0
+
+
 def load_management_actions_config() -> Optional[List[str]]:
     """Read ``eko.management_actions`` from user config.
 
@@ -61,17 +66,14 @@ def load_management_actions_config() -> Optional[List[str]]:
     Result is cached for 60 s to avoid hitting the filesystem on every
     tool invocation.
     """
+    global _mgmt_cache_val, _mgmt_cache_ts
     now = time.time()
-    if load_management_actions_config._cache_ts and (now - load_management_actions_config._cache_ts < 60):
-        return load_management_actions_config._cache_val
+    if _mgmt_cache_ts and (now - _mgmt_cache_ts < 60):
+        return _mgmt_cache_val
     result = _load_management_actions_raw()
-    load_management_actions_config._cache_val = result
-    load_management_actions_config._cache_ts = now
+    _mgmt_cache_val = result
+    _mgmt_cache_ts = now
     return result
-
-
-load_management_actions_config._cache_val: Optional[List[str]] = None
-load_management_actions_config._cache_ts: float = 0.0
 
 
 def _load_management_actions_raw() -> Optional[List[str]]:
