@@ -1,28 +1,29 @@
 # Eko Adapter — Session Notes
 
+Operational reference accumulated across development sessions. Architecture, setup, and API reference live in `plugins/platforms/eko/README.md`.
+
 ## Current State
 
-**Working:** v1.5.0 live at `S2P2/hermes-agent` — bidirectional text chat + image/file + group/topic + management tools.
+**Working:** v1.10.0 at `S2P2/hermes-agent` — full bidirectional messaging with group/topic routing, media, management tools, and webhook verification.
 
-**Tested and confirmed working:**
+**Features:**
 - Webhook receives messages from Eko
 - OAuth2 auth (form-urlencoded, not JSON)
 - Reply token → push fallback
 - User allowlist (`EKO_ALLOWED_USERS`)
 - Home channel (`EKO_HOME_CHANNEL`)
 - Webhook signature verification (`X-Eko-Signature` HMAC-SHA256-Base64)
-- Inbound image receiving — download, cache, vision model interpretation ✅
-- Outbound image/file sending — multipart upload (DM + group/topic) ✅
-- Cron media attachments ✅
-- Group/topic outbound routing (by `groupId`+`topicId` presence, NOT `groupType`) ✅
-- Document routing to topics ✅ (fixed Issue #20)
-- Management tools: `eko_create_group`, `eko_create_topic`, `eko_query_users` ✅ (Issues #16, #17)
+- Inbound image receiving — download, cache, vision model interpretation
+- Outbound image/file sending — multipart upload (DM + group/topic)
+- Cron media attachments
+- Group/topic outbound routing (by `groupId`+`topicId` presence, NOT `groupType`)
+- Management tools: `eko_create_group`, `eko_create_topic`, `eko_query_users` (config-gated via `eko.management_actions`)
+- Require mention in groups (`EKO_REQUIRE_MENTION`, `EKO_MENTION_TRIGGERS`)
+- Group/topic allowlists (`EKO_ALLOWED_GROUPS`, `EKO_ALLOWED_TOPICS`, `EKO_ALLOW_ALL_GROUPS`)
 
-**Known issues / limitations:**
+**Known limitations:**
 - Inbound file: no webhook event from Eko (platform limitation)
-- Inbound sticker: `[sticker]` placeholder only (no download API)
-- No `require_mention` config for group chats yet (Issue #22)
-- No management actions config gate yet (Issue #23)
+- Inbound sticker: `[sticker packageId=... stickerId=...]` placeholder only (no download API)
 
 ## Key Decisions
 
@@ -38,7 +39,7 @@
 ## Repo Setup
 
 ```
-origin   → https://github.com/S2P2/hermes-agent.git (your fork)
+origin   → https://github.com/S2P2/hermes-agent.git (fork)
 upstream → https://github.com/NousResearch/hermes-agent.git
 ```
 
@@ -46,12 +47,15 @@ upstream → https://github.com/NousResearch/hermes-agent.git
 
 | File | Purpose |
 |------|---------|
-| `plugins/platforms/eko/adapter.py` | Full adapter (~1600 lines) — _EkoClient + EkoAdapter |
-| `plugins/platforms/eko/tools.py` | Management agent tools (3 tools) |
-| `plugins/platforms/eko/README.md` | Setup guide + roadmap + version history |
-| `tests/gateway/test_eko_plugin.py` | Tests (131 tests) |
-| `docs/adr/0001-eko-no-auto-topic.md` | ADR: no auto-topic creation |
-| `docs/adr/0002-eko-separate-management-tools.md` | ADR: separate tools vs action-dispatch |
+| `plugins/platforms/eko/adapter.py` | Adapter + OAuth client (~1000 lines) |
+| `plugins/platforms/eko/client.py` | Eko API client (separate from adapter) |
+| `plugins/platforms/eko/config.py` | Config dataclass, env/config precedence |
+| `plugins/platforms/eko/inbound.py` | Inbound message normalization |
+| `plugins/platforms/eko/outbound.py` | Outbound sender, route resolution |
+| `plugins/platforms/eko/management.py` | Management tools runtime + config gate |
+| `plugins/platforms/eko/tools.py` | Tool registration (3 management tools) |
+| `plugins/platforms/eko/routing.py` | Session routing logic |
+| `tests/gateway/test_eko_plugin.py` | Tests (212 tests) |
 
 ## Eko API Endpoints
 
@@ -80,13 +84,6 @@ upstream → https://github.com/NousResearch/hermes-agent.git
 - Webhook signature: `X-Eko-Signature`, HMAC-SHA256-Base64
 - Webhook user-agent: `axios/0.19.2`
 
-## Open Issues
-
-| # | Title | Priority |
-|---|-------|----------|
-| 22 | `eko.require_mention` config — bot only responds when @mentioned in groups | Medium |
-| 23 | `eko.management_actions` config gate — allowlist for management tools | Low |
-
 ## Pitfalls
 
 - `runner.adapters` is `Dict[Platform, BasePlatformAdapter]` — use `Platform("eko")` not `"eko"` string
@@ -94,3 +91,4 @@ upstream → https://github.com/NousResearch/hermes-agent.git
 - Empty text chunks cause Eko 400 errors — filter before sending
 - `logger.info("format %s", args)` with mismatched arg count silently fails
 - `_last_resolved_tool_names` is a process-global in `model_tools.py`
+- Eko adapter inherits `edit_message` from `BasePlatformAdapter` (no-op) — gateway uses compact progress messages instead of editable bubbles
