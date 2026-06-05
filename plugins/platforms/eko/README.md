@@ -391,3 +391,26 @@ See `docs/adr/` for architectural decision records:
 - [ ] Run test suite: `scripts/run_tests.sh tests/gateway/test_eko_plugin.py`
 - [ ] Tune reply token TTL (current default: 50s — verify against actual Eko TTL)
 - [ ] Test OAuth token TTL handling (refresh before expiry)
+
+## API Quirks
+
+Operational observations from live API testing. Not all are documented in the official Eko API reference.
+
+- **OAuth token endpoint is form-urlencoded**, not JSON.
+- **`groupType` is unreliable.** Eko sets `groupType: "direct_chat"` even for topics inside DM-type groups. Always route by `groupId` + `topicId` presence.
+- **Webhook events have no event ID.** Dedup uses a full-JSON hash.
+- **Source uses `userId` or `uid`** depending on event type.
+- **Reply endpoint uses multipart/form-data**; push uses JSON.
+- **Webhook signature:** `X-Eko-Signature`, HMAC-SHA256-Base64.
+- **Webhook user-agent:** `axios/0.19.2`.
+
+## Pitfalls
+
+Integration traps encountered during development.
+
+- **`runner.adapters` is `Dict[Platform, BasePlatformAdapter]`.** Use `Platform("eko")`, not a raw `"eko"` string.
+- **`send_message` MEDIA delivery has a hardcoded platform allowlist.** New platforms must be added to the source.
+- **Empty text chunks cause Eko 400 errors.** Filter before sending.
+- **`logger.info("format %s", args)` with mismatched arg count silently fails** — no exception, just no output.
+- **`_last_resolved_tool_names` is a process-global** in `model_tools.py`.
+- **Eko adapter inherits `edit_message` from `BasePlatformAdapter` (no-op).** The gateway uses compact progress messages instead of editable bubbles.
