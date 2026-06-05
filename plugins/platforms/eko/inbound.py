@@ -105,7 +105,9 @@ async def normalize_message_event(
             message_type = MessageType.PHOTO
         text = "[image]"
     elif msg_type == "sticker":
-        text = "[sticker]"
+        pkg = msg.get("packageId", "")
+        stk = msg.get("stickerId", "")
+        text = f"[sticker packageId={pkg} stickerId={stk}]" if pkg or stk else "[sticker]"
     elif msg_type == "file":
         text = "[file]"
     else:
