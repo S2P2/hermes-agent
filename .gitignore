@@ -4,6 +4,7 @@
 /_pycache/
 *.pyc*
 __pycache__/
+.pi/
 .venv/
 .vscode/
 .env
@@ -102,7 +103,7 @@ config/mcporter.json
 
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
-docs/superpowers/*
+docs/superpowers/*.worktrees/
 # Working directory for the Hermes Agent's session state (~/.hermes/ at runtime;
 # also created in-repo when an agent operates in this checkout). Plans, audit
 # logs, and per-session caches are never artifacts of the codebase.

@@ -143,7 +143,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat), 'eko:group:<gid>:topic:<tid>'"
             },
             "message": {
                 "type": "string",
@@ -388,6 +388,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
+    if platform_name == "eko":
+        trimmed = target_ref.strip()
+        if trimmed.startswith("group:"):
+            return trimmed, None, True
     if platform_name == "yuanbao":
         match = _YUANBAO_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -749,11 +753,15 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- Eko: media delivery via live adapter's send_image_file/send_document ---
+    if platform.value == "eko" and media_files:
+        return await _send_eko_media(pconfig, chat_id, chunks, media_files)
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and eko; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -761,13 +769,13 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and eko"
         )
 
     last_result = None
     for chunk in chunks:
         if platform == Platform.SLACK:
-            result = await _send_slack(pconfig.token, chat_id, chunk, thread_ts=thread_id)
+            result = await _send_slack(pconfig.token, chat_id, chunk)
         elif platform == Platform.WHATSAPP:
             result = await _send_whatsapp(pconfig.extra, chat_id, chunk)
         elif platform == Platform.SIGNAL:
@@ -1049,7 +1057,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         return _error(f"Telegram send failed: {e}")
 
 
-async def _send_slack(token, chat_id, message, thread_ts=None):
+async def _send_slack(token, chat_id, message):
     """Send via Slack Web API."""
     try:
         import aiohttp
@@ -1063,8 +1071,6 @@ async def _send_slack(token, chat_id, message, thread_ts=None):
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
             payload = {"channel": chat_id, "text": message, "mrkdwn": True}
-            if thread_ts:
-                payload["thread_ts"] = thread_ts
             async with session.post(url, headers=headers, json=payload, **_req_kw) as resp:
                 data = await resp.json()
                 if data.get("ok"):
@@ -1787,6 +1793,120 @@ async def _send_yuanbao(chat_id, message, media_files=None):
         return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)
     except Exception as e:
         return _error(f"Yuanbao send failed: {e}")
+
+
+async def _send_eko_media(pconfig, chat_id, chunks, media_files):
+    """Send text + media to Eko via the live gateway adapter.
+
+    Routes through the running EkoAdapter's ``send()`` for text and
+    ``send_image_file()`` / ``send_document()`` for attachments.
+    Falls back to ``_send_via_adapter`` if no live adapter is available.
+    """
+    _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+    adapter = None
+    try:
+        from gateway.run import _gateway_runner_ref
+        from gateway.config import Platform as _Platform
+        runner = _gateway_runner_ref()
+        if runner:
+            adapter = runner.adapters.get(_Platform("eko"))
+    except Exception:
+        adapter = None
+
+    logger.info("Eko _send_eko_media: adapter=%s media_files=%d", adapter is not None, len(media_files or []))
+
+    if adapter is not None:
+        # If the chat_id has no routing metadata (e.g. bare uid from home
+        # channel), try the current session's chat_id from the gateway
+        # context — this is the topic/group the user is actively chatting in.
+        info = await adapter.get_chat_info(chat_id)
+        if info.get("type") == "dm":
+            try:
+                from gateway.session_context import get_session_env
+                session_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+                if session_chat_id:
+                    session_info = await adapter.get_chat_info(session_chat_id)
+                    if session_info.get("type") != "dm":
+                        logger.info("Eko _send_eko_media: remapped chat_id %s -> %s from session context", chat_id, session_chat_id)
+                        chat_id = session_chat_id
+            except Exception:
+                pass
+
+    if adapter is None:
+        # No live adapter — route through standalone sender which now
+        # supports media_files via push_picture/push_file.
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+            is_last = (i == len(chunks) - 1)
+            from gateway.config import Platform as _Platform
+            result = await _send_via_adapter(
+                _Platform("eko"),
+                pconfig,
+                chat_id,
+                chunk,
+                media_files=media_files if is_last else None,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        # If all chunks were empty (media-only), send media via standalone.
+        if last_result is None and media_files:
+            from gateway.config import Platform as _Platform
+            result = await _send_via_adapter(
+                _Platform("eko"),
+                pconfig,
+                chat_id,
+                "",
+                media_files=media_files,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result or {"success": True, "message_id": None}
+
+    warnings = []
+
+    # Send text chunks.
+    last_result = None
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        try:
+            result = await adapter.send(chat_id=chat_id, content=chunk)
+            if not result.success:
+                return {"error": f"Eko send failed: {result.error}"}
+            last_result = {"success": True, "message_id": result.message_id}
+        except Exception as e:
+            return {"error": f"Eko send failed: {e}"}
+
+    # Send media attachments.
+    for media_path, _is_voice in media_files:
+        if not os.path.exists(media_path):
+            warnings.append(f"Media file not found: {media_path}")
+            continue
+        ext = os.path.splitext(media_path)[1].lower()
+        try:
+            if ext in _IMAGE_EXTS:
+                logger.info("Eko _send_eko_media: sending image %s to %s", media_path, chat_id)
+                result = await adapter.send_image_file(chat_id, media_path)
+            else:
+                logger.info("Eko _send_eko_media: sending document %s to %s", media_path, chat_id)
+                result = await adapter.send_document(chat_id, media_path)
+            logger.info("Eko _send_eko_media: send result success=%s error=%s", result.success, getattr(result, 'error', None))
+            if not result.success:
+                warnings.append(f"Failed to send {os.path.basename(media_path)}: {result.error}")
+        except Exception as e:
+            logger.warning("Eko _send_eko_media: exception sending %s: %s", media_path, e)
+            warnings.append(f"Failed to send {os.path.basename(media_path)}: {e}")
+
+    if last_result is None:
+        last_result = {"success": True, "message_id": None}
+    if warnings:
+        last_result["warnings"] = warnings
+    return last_result
 
 
 # --- Registry ---

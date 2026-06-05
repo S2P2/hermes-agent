@@ -4,6 +4,13 @@
 
 # Hermes Agent ☤
 
+> **Fork notice:** This is the [S2P2/hermes-agent](https://github.com/S2P2/hermes-agent) fork, maintained to add **[Eko](https://eko.gitbook.io/api) messaging platform** support via [`plugins/platforms/eko/`](plugins/platforms/eko/). Upstream changes from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) are regularly merged in.
+>
+> **Fork features:**
+>
+> - **Eko platform adapter** (`plugins/platforms/eko/`) — full inbound/outbound messaging with group/topic routing, media sending, management API tools (create group, create topic, add/remove members), quick replies for exec approvals, webhook signature enforcement, and per-group mention/allowlist filtering.
+> - **Compact tool progress for no-edit platforms** — adapters without `edit_message` support (Eko, Signal, SMS, email, BlueBubbles, etc.) now show one `🔧` message per tool invocation when `tool_progress` is enabled, instead of silently dropping progress. ([#59](https://github.com/S2P2/hermes-agent/pull/59))
+
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
   <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
@@ -33,7 +40,7 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 ### Linux, macOS, WSL2, Termux
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 ```
 
 ### Windows (native, PowerShell)
@@ -43,7 +50,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 Run this in PowerShell:
 
 ```powershell
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
 ```
 
 The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hermes uses this bundled Git Bash to run shell commands.
@@ -52,7 +59,7 @@ If you already have Git installed, the installer detects it and uses that instea
 
 > **Android / Termux:** The tested manual path is documented in the [Termux guide](https://hermes-agent.nousresearch.com/docs/getting-started/termux). On Termux, Hermes installs a curated `.[termux]` extra because the full `.[all]` extra currently pulls Android-incompatible voice dependencies.
 >
-> **Windows:** Native Windows is fully supported — the PowerShell one-liner above installs everything. If you'd rather use WSL2, the Linux command works there too. Native Windows install lives under `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux. The only Hermes feature that currently needs WSL2 specifically is the browser-based dashboard chat pane (it uses a POSIX PTY — classic CLI and gateway both run natively).
+> **Windows:** Native Windows is fully supported — the PowerShell one-liner above installs everything. If you'd rather use WSL2, the Linux command works there too. Native Windows install lives under `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux.  The only Hermes feature that currently needs WSL2 specifically is the browser-based dashboard chat pane (it uses a POSIX PTY — classic CLI and gateway both run natively).
 
 After installation:
 
