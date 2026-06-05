@@ -69,6 +69,10 @@ Run in powershell:
 iex (irm https://hermes-agent.nousresearch.com/install.ps1) 
 ```
 
+Prefer native installers for desktop use?
+
+- **Desktop downloads:** [GitHub Releases](https://github.com/NousResearch/hermes-agent/releases/latest)
+
 :::tip Android / Termux
 If you're installing on a phone, see the dedicated [Termux guide](./termux.md) for the tested manual path, supported extras, and current Android-specific limitations.
 :::

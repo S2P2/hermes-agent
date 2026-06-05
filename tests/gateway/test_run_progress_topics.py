@@ -121,6 +121,10 @@ class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
         raise AssertionError("non-editable adapters should not receive edit_message calls")
 
 
+class InheritedNoEditProgressCaptureAdapter(ProgressCaptureAdapter):
+    edit_message = BasePlatformAdapter.edit_message
+
+
 class FakeAgent:
     def __init__(self, **kwargs):
         # Capture anything passed via kwargs (older code path) but don't
@@ -734,6 +738,48 @@ async def _run_with_agent(
         session_key=session_key,
     )
     return adapter, result
+
+
+@pytest.mark.asyncio
+async def test_no_edit_adapter_sends_separate_tool_progress(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FakeAgent,
+        session_id="sess-no-edit-progress",
+        config_data={"display": {"tool_progress": "all"}},
+        platform=Platform("eko"),
+        chat_id="group:g1:topic:t1",
+        chat_type="group",
+        thread_id="t1",
+        adapter_cls=InheritedNoEditProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.edits == []
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert any("terminal" in text for text in sent_texts)
+    assert any("browser_navigate" in text for text in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_no_edit_adapter_does_not_send_progress_when_off(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FakeAgent,
+        session_id="sess-no-edit-progress-off",
+        config_data={"display": {"tool_progress": "off"}},
+        platform=Platform.BLUEBUBBLES,
+        chat_id="iMessage;-;user@example.com",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=InheritedNoEditProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent == []
+    assert adapter.edits == []
 
 
 @pytest.mark.asyncio
