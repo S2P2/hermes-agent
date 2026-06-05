@@ -29,7 +29,7 @@ enabling bidirectional text chat between Eko users and the Hermes agent.
 - Hermes Agent with gateway support
 - An Eko admin panel account with bot integration enabled
 - A publicly reachable HTTPS URL for the webhook (e.g. via ngrok, caddy, or reverse proxy)
-- `aiohttp` Python package
+- `aiohttp` Python package (included in core dependencies since v1.11.0)
 
 ## Reference
 
@@ -273,6 +273,16 @@ targets. Without the explicit format, standalone delivery falls back to DM push.
 
 ## Version History
 
+### v1.11.0
+
+- **aiohttp promoted to core dependency.** Used by ~20 gateway adapters, no longer needs separate install (Issue #74).
+- **Sticker event debug logging.** `packageId`/`stickerId` logged at DEBUG level for easier debugging; user-facing text now includes identifiers (Issue #77).
+- **Tool error messages on no-edit platforms.** Failed tool calls surface compact `❌ tool: error` messages on platforms that can't edit bubbles (Eko, Signal, SMS, etc.). Successful tools remain silent (Issue #60, PR #81).
+- **Interactive setup fixed.** `hermes setup eko` now correctly uses `get_env_value`/`save_env_value` for `.env` persistence (Issue #68, PR #79).
+- **Deduplicator uses true LRU.** `_MessageDeduplicator` replaced with `OrderedDict` for O(1) bounded eviction with hard cap (Issue #73, PR #79).
+- **Management config cached.** `load_management_actions_config()` uses 60s TTL cache to avoid filesystem hits on every check (Issue #75, PR #79).
+- **Reply token deduplicated.** `_consume_reply_token` consolidated into single method on `OutboundSender`; adapter delegates (Issue #76, PR #79).
+
 ### v1.10.0
 
 - **Deepened routing and management modules.** Extracted routing logic into dedicated helpers, improved group/topic resolution for edge cases (DM-type groups with topics, standalone routing fallbacks), and hardened management tool error handling. Internal refactor — no new env vars or config keys.
@@ -369,6 +379,7 @@ None currently.
 | Feature | Description | Notes |
 |---------|-------------|-------|
 | ~~Compact tool progress~~ | One-shot progress message on no-edit platforms | Issue #32 ✅ (PR #59 — core gateway change, not Eko-specific) |
+| ~~Tool error messages~~ | Failed tool call bubbles on no-edit platforms | Issue #60 ✅ (PR #81 — core gateway change, not Eko-specific) |
 
 ### Low priority
 

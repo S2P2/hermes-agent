@@ -8,10 +8,14 @@ filtering, and invoking the standard gateway handler.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from gateway.platforms.base import MessageType
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -108,6 +112,7 @@ async def normalize_message_event(
         pkg = msg.get("packageId", "")
         stk = msg.get("stickerId", "")
         text = f"[sticker packageId={pkg} stickerId={stk}]" if pkg or stk else "[sticker]"
+        _log.debug("Sticker received: packageId=%s stickerId=%s", pkg, stk)
     elif msg_type == "file":
         text = "[file]"
     else:

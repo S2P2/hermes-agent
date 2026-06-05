@@ -1393,6 +1393,7 @@ name = "hermes-agent"
 version = "0.15.1"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "croniter" },
     { name = "fastapi" },
     { name = "fire" },
@@ -1423,7 +1424,6 @@ acp = [
 ]
 all = [
     { name = "agent-client-protocol" },
-    { name = "aiohttp" },
     { name = "fastapi" },
     { name = "google-api-python-client" },
     { name = "google-auth-httplib2" },
@@ -1493,9 +1493,6 @@ google = [
 hindsight = [
     { name = "hindsight-client" },
 ]
-homeassistant = [
-    { name = "aiohttp" },
-]
 honcho = [
     { name = "honcho-ai" },
 ]
@@ -1510,7 +1507,6 @@ mcp = [
     { name = "starlette" },
 ]
 messaging = [
-    { name = "aiohttp" },
     { name = "brotlicffi" },
     { name = "discord-py", extra = ["voice"] },
     { name = "python-telegram-bot", extra = ["webhooks"] },
@@ -1531,12 +1527,8 @@ parallel-web = [
     { name = "parallel-web" },
 ]
 slack = [
-    { name = "aiohttp" },
     { name = "slack-bolt" },
     { name = "slack-sdk" },
-]
-sms = [
-    { name = "aiohttp" },
 ]
 termux = [
     { name = "agent-client-protocol" },
@@ -1548,7 +1540,6 @@ termux = [
 ]
 termux-all = [
     { name = "agent-client-protocol" },
-    { name = "aiohttp" },
     { name = "fastapi" },
     { name = "google-api-python-client" },
     { name = "google-auth-httplib2" },
@@ -1586,10 +1577,7 @@ youtube = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", marker = "extra == 'acp'", specifier = "==0.9.0" },
-    { name = "aiohttp", marker = "extra == 'homeassistant'", specifier = "==3.13.3" },
-    { name = "aiohttp", marker = "extra == 'messaging'", specifier = "==3.13.3" },
-    { name = "aiohttp", marker = "extra == 'slack'", specifier = "==3.13.3" },
-    { name = "aiohttp", marker = "extra == 'sms'", specifier = "==3.13.3" },
+    { name = "aiohttp", specifier = "==3.13.3" },
     { name = "aiohttp-socks", marker = "extra == 'matrix'", specifier = "==0.11.0" },
     { name = "aiosqlite", marker = "extra == 'matrix'", specifier = "==0.22.1" },
     { name = "alibabacloud-dingtalk", marker = "extra == 'dingtalk'", specifier = "==2.2.42" },

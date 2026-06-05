@@ -1310,3 +1310,136 @@ async def test_verbose_mode_respects_explicit_tool_preview_length(monkeypatch, t
     assert VerboseAgent.LONG_CODE not in all_content
     # But should still contain the truncated portion with "..."
     assert "..." in all_content
+
+
+# ---- Tool error progress on no-edit platforms ----
+
+
+class ToolErrorAgent:
+    """Agent that emits tool.started then tool.completed with is_error=True."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "terminal", "ls /nope", {})
+            time.sleep(0.1)
+            cb(
+                "tool.completed",
+                "terminal",
+                None,
+                None,
+                duration=0.5,
+                is_error=True,
+                result="command not found",
+            )
+            time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls":  1,
+        }
+
+
+class ToolSuccessAgent:
+    """Agent that emits tool.started then tool.completed with is_error=False."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "terminal", "ls", {})
+            time.sleep(0.1)
+            cb(
+                "tool.completed",
+                "terminal",
+                None,
+                None,
+                duration=0.1,
+                is_error=False,
+                result="/home\n/tmp",
+            )
+            time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+@pytest.mark.asyncio
+async def test_no_edit_adapter_sends_error_on_tool_failure(monkeypatch, tmp_path):
+    """On no-edit platforms, tool.completed with is_error=True sends a compact error."""
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ToolErrorAgent,
+        session_id="sess-no-edit-tool-error",
+        config_data={"display": {"tool_progress": "all"}},
+        platform=Platform("eko"),
+        chat_id="group:g1:topic:t1",
+        chat_type="group",
+        thread_id="t1",
+        adapter_cls=InheritedNoEditProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    sent_texts = [call["content"] for call in adapter.sent]
+    # Should have the tool.started message
+    assert any("terminal" in text for text in sent_texts)
+    # Should have the error message
+    error_texts = [t for t in sent_texts if "\u274c" in t]
+    assert len(error_texts) >= 1
+    assert "terminal" in error_texts[0]
+    assert "command not found" in error_texts[0]
+
+
+@pytest.mark.asyncio
+async def test_no_edit_adapter_no_message_on_tool_success(monkeypatch, tmp_path):
+    """On no-edit platforms, successful tool.completed sends no extra message."""
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ToolSuccessAgent,
+        session_id="sess-no-edit-tool-success",
+        config_data={"display": {"tool_progress": "all"}},
+        platform=Platform("eko"),
+        chat_id="group:g1:topic:t1",
+        chat_type="group",
+        thread_id="t1",
+        adapter_cls=InheritedNoEditProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    sent_texts = [call["content"] for call in adapter.sent]
+    # Only the tool.started message — no success/completion message
+    assert len(sent_texts) == 1
+    assert "terminal" in sent_texts[0]
+
+
+@pytest.mark.asyncio
+async def test_editable_adapter_no_error_message_on_tool_failure(monkeypatch, tmp_path):
+    """On editable platforms (Telegram), tool errors do NOT send a separate error message."""
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ToolErrorAgent,
+        session_id="sess-editable-tool-error",
+        config_data={"display": {"tool_progress": "all"}},
+        platform=Platform.TELEGRAM,
+        chat_id="-1001",
+        chat_type="group",
+        thread_id="17585",
+        adapter_cls=ProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    sent_texts = [call["content"] for call in adapter.sent]
+    # No separate error message sent
+    assert not any("\u274c" in text for text in sent_texts)

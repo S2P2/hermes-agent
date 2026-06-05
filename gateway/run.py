@@ -17078,8 +17078,24 @@ class GatewayRunner:
                             mark_seen(_hermes_home / "config.yaml", TOOL_PROGRESS_FLAG)
                 except Exception as _hint_err:
                     logger.debug("tool-progress onboarding hint failed: %s", _hint_err)
+
+            # On tool failure, emit a compact error message so no-edit platforms
+            # see what went wrong.  Successful completions are silently ignored
+            # (the next tool.started or final reply is sufficient context).
+            if event_type == "tool.completed" and kwargs.get("is_error"):
+                _result = kwargs.get("result", "")
+                if _result:
+                    from agent.display import get_tool_preview_max_len
+                    _pl = get_tool_preview_max_len()
+                    _cap = _pl if _pl > 0 else 80
+                    if len(_result) > _cap:
+                        _result = _result[:_cap - 3] + "..."
+                msg = f"\u274c {tool_name}: {_result}" if _result else f"\u274c {tool_name} failed"
+                progress_queue.put(("__error__", tool_name, msg))
                 return
 
+            if event_type == "tool.completed":
+                return
 
             # Only act on tool.started events (ignore tool.completed, reasoning.available, etc.)
             if event_type not in {"tool.started",}:
@@ -17191,12 +17207,10 @@ class GatewayRunner:
 
             # No-edit platforms cannot update one progress bubble.  When tool
             # progress is enabled, send one compact message per tool start
-            # instead of silently draining the queue.  Skip bookkeeping tuples
-            # (__dedup__, __reset__) that only make sense for editable bubbles.
-            #
-            # TODO(future): on tool.completed with is_error=True, send an
-            # error message (e.g. "❌ terminal: <error>") so no-edit users
-            # see tool failures in context.
+            # instead of silently draining the queue.  __error__ tuples from
+            # failed tools are sent as compact error messages; other bookkeeping
+            # tuples (__dedup__, __reset__) are skipped (only meaningful for
+            # editable bubbles).
             if type(adapter).edit_message is BasePlatformAdapter.edit_message:
                 while True:
                     try:
@@ -17209,6 +17223,18 @@ class GatewayRunner:
                             return
                         raw = progress_queue.get_nowait()
                         if isinstance(raw, tuple):
+                            # Error tuples carry a ready-to-send message.
+                            if len(raw) == 3 and raw[0] == "__error__":
+                                _, _err_tool, _err_msg = raw
+                                try:
+                                    await adapter.send(
+                                        chat_id=source.chat_id,
+                                        content=_err_msg,
+                                        reply_to=_progress_reply_to,
+                                        metadata=_progress_metadata,
+                                    )
+                                except Exception as e:
+                                    logger.debug("Error progress send failed: %s", e)
                             continue
                         try:
                             _agent_for_interrupt = agent_holder[0] if agent_holder else None
@@ -17401,6 +17427,11 @@ class GatewayRunner:
                         progress_lines = []
                         last_progress_msg[0] = None
                         repeat_count[0] = 0
+                        continue
+                    elif isinstance(raw, tuple) and raw[0] == "__error__":
+                        # Tool error — only sent to no-edit platforms (handled
+                        # above).  On editable platforms the agent result is
+                        # already visible in the progress bubble, so skip.
                         continue
                     else:
                         msg = raw
