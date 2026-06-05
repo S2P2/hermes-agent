@@ -1603,7 +1603,7 @@ class TestInboundPicture:
 
         await adapter._handle_message_event(event)
         call_args = adapter.handle_message.call_args[0][0]
-        assert call_args.text == "[sticker]"
+        assert call_args.text == "[sticker packageId=pkg1 stickerId=stk1]"
 
 
 # ---------------------------------------------------------------------------
@@ -3390,6 +3390,7 @@ class TestManagementActionsConfigGate:
     def test_load_config_filters_invalid_names(self):
         """Invalid action names are filtered out; valid ones are kept."""
         from plugins.platforms.eko.management import load_management_actions_config
+        load_management_actions_config._cache_ts = 0.0
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {"management_actions": ["create_group", "bogus", "query_users"]}
         with patch("plugins.platforms.eko.management.logger"), \
@@ -3399,6 +3400,7 @@ class TestManagementActionsConfigGate:
 
     def test_load_config_returns_none_when_unset(self):
         from plugins.platforms.eko.management import load_management_actions_config
+        load_management_actions_config._cache_ts = 0.0
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {}
         with patch("hermes_cli.config.load_config", return_value=mock_cfg):
@@ -3407,6 +3409,7 @@ class TestManagementActionsConfigGate:
 
     def test_load_config_comma_separated_string(self):
         from plugins.platforms.eko.management import load_management_actions_config
+        load_management_actions_config._cache_ts = 0.0
         mock_cfg = MagicMock()
         mock_cfg.get.return_value = {"management_actions": "create_group, query_users"}
         with patch("hermes_cli.config.load_config", return_value=mock_cfg):

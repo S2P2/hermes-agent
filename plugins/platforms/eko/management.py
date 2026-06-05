@@ -8,6 +8,7 @@ resolution, and result/error formatting.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Callable, Iterable, List, Optional
 
 from tools.registry import tool_error, tool_result
@@ -56,7 +57,24 @@ def load_management_actions_config() -> Optional[List[str]]:
 
     Returns a list of allowed action names, or ``None`` if the user hasn't
     restricted the set (default: all actions allowed).
+
+    Result is cached for 60 s to avoid hitting the filesystem on every
+    tool invocation.
     """
+    now = time.time()
+    if load_management_actions_config._cache_ts and (now - load_management_actions_config._cache_ts < 60):
+        return load_management_actions_config._cache_val
+    result = _load_management_actions_raw()
+    load_management_actions_config._cache_val = result
+    load_management_actions_config._cache_ts = now
+    return result
+
+
+load_management_actions_config._cache_val: Optional[List[str]] = None
+load_management_actions_config._cache_ts: float = 0.0
+
+
+def _load_management_actions_raw() -> Optional[List[str]]:
     try:
         from hermes_cli.config import load_config
         cfg = load_config()

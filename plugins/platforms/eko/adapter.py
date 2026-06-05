@@ -28,6 +28,7 @@ the signature doesn't match, the request is rejected with 403.
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import hmac
 import json
@@ -85,7 +86,7 @@ class _MessageDeduplicator:
     """Bounded LRU of event hashes to ignore at-least-once retries."""
 
     def __init__(self, max_size: int = 500) -> None:
-        self._seen: Dict[str, float] = {}
+        self._seen: collections.OrderedDict[str, float] = collections.OrderedDict()
         self._max = max_size
 
     def is_duplicate(self, event: Dict[str, Any]) -> bool:
@@ -93,10 +94,12 @@ class _MessageDeduplicator:
         raw = json.dumps(event, sort_keys=True, default=str)
         digest = hashlib.sha256(raw.encode()).hexdigest()[:24]
         if digest in self._seen:
+            # Move to end (most-recently seen).
+            self._seen.move_to_end(digest)
             return True
-        if len(self._seen) >= self._max:
-            cutoff = sorted(self._seen.values())[len(self._seen) // 10 or 1]
-            self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
+        # Evict oldest entries to stay bounded.
+        while len(self._seen) >= self._max:
+            self._seen.popitem(last=False)
         self._seen[digest] = time.time()
         return False
 
@@ -755,15 +758,9 @@ class EkoAdapter(BasePlatformAdapter):
     def _consume_reply_token(self, chat_id: str) -> Tuple[str, bool]:
         """Consume a stashed reply token if present and unexpired.
 
-        Returns ``(token, used_reply)``.
+        Delegates to ``OutboundSender`` which owns the shared token store.
         """
-        entry = self._reply_tokens.pop(chat_id, None)
-        if not entry:
-            return "", False
-        token, expires_at = entry
-        if not token or time.time() >= expires_at:
-            return "", False
-        return token, True
+        return self._sender._consume_reply_token(chat_id)
 
     def _verify_signature(self, body: bytes, signature: str) -> bool:
         """Verify X-Eko-Signature HMAC-SHA256-Base64 digest.
@@ -978,7 +975,7 @@ def interactive_setup() -> None:
     print()
 
     try:
-        from hermes_cli.config import get_env_var, set_env_var
+        from hermes_cli.config import get_env_value, save_env_value
     except ImportError:
         print(
             "hermes_cli.config not available; "
@@ -987,19 +984,19 @@ def interactive_setup() -> None:
         return
 
     def _prompt(var: str, prompt: str, *, secret: bool = False) -> None:
-        existing = get_env_var(var) if callable(get_env_var) else None
+        existing = get_env_value(var)
         suffix = " [keep current]" if existing else ""
         try:
             if secret:
                 import getpass
-                value = getpass.getpass(f"{prompt}{suffix}: ")
+                value = getpass.getpass(f"{prompt}{suffix}: ").strip()
             else:
                 value = input(f"{prompt}{suffix}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
         if value:
-            set_env_var(var, value)
+            save_env_value(var, value)
 
     _prompt("EKO_BASE_URL", "Eko base URL (e.g. https://customer-h1.ekoapp.com)")
     _prompt("EKO_OAUTH_CLIENT_ID", "OAuth client ID")

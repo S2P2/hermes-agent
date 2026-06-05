@@ -3420,6 +3420,43 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "messaging",
     },
+    # ── Eko Messaging ──
+    "EKO_BASE_URL": {
+        "description": "Eko Messaging API base URL (e.g. https://customer-h1.ekoapp.com)",
+        "prompt": "Eko base URL",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "EKO_OAUTH_CLIENT_ID": {
+        "description": "Eko OAuth client ID for Webhook API bot",
+        "prompt": "Eko OAuth client ID",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "EKO_OAUTH_CLIENT_SECRET": {
+        "description": "Eko OAuth client secret for Webhook API bot",
+        "prompt": "Eko OAuth client secret",
+        "url": None,
+        "password": True,
+        "category": "messaging",
+    },
+    "EKO_WEBHOOK_SECRET": {
+        "description": "Eko webhook signing secret (defaults to OAuth client secret if blank)",
+        "prompt": "Eko webhook signing secret",
+        "url": None,
+        "password": True,
+        "category": "messaging",
+    },
+    "EKO_ALLOWED_USERS": {
+        "description": "Comma-separated Eko user IDs allowed to interact with the bot (blank = all)",
+        "prompt": "Allowed Eko user IDs (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+
     "WEBHOOK_SECRET": {
         "description": "Global HMAC secret for webhook signature validation (overridable per route in config.yaml).",
         "prompt": "Webhook secret",
