@@ -311,9 +311,29 @@ def _image_to_base64_data_url(image_path: Path, mime_type: Optional[str] = None)
     return data_url
 
 
-# Hard limit for vision API payloads (20 MB) — matches the most restrictive
-# major provider (Gemini inline data limit).  Images above this are rejected.
+# Absolute hard ceiling for vision API payloads (20 MB) — above this, no major
+# provider accepts the image and we reject outright.
 _MAX_BASE64_BYTES = 20 * 1024 * 1024
+
+# Proactive embed cap (4 MB).  This is the size we resize an image DOWN to
+# before embedding it into conversation history, regardless of the 20 MB hard
+# ceiling.  Anthropic's per-image base64 limit is 5 MB; once an oversized image
+# is baked into history (e.g. a vision tool-result), it is re-sent on every
+# subsequent turn and permanently wedges the session with a 400 that retries
+# can't clear (the bad bytes are immutable history).  Capping at embed time —
+# with headroom under 5 MB — is the only durable fix.  Matches the post-failure
+# shrink target in agent.conversation_compression so behaviour is consistent
+# whether we resize proactively or reactively.
+_EMBED_TARGET_BYTES = 4 * 1024 * 1024
+
+# Proactive embed dimension cap (px, longest side).  Anthropic enforces an
+# 8000px per-side ceiling INDEPENDENTLY of the 5 MB byte cap — a tall full-page
+# screenshot can be well under 5 MB yet far over 8000px (e.g. 1200×12000 at
+# 0.06 MB), so the byte-only embed check above lets it slip into immutable
+# history un-resized and the session bricks on a non-retryable 400.  We cap at
+# 7900 (headroom under 8000) so the proactive resize shrinks tall small-byte
+# images before they are embedded.
+_EMBED_MAX_DIMENSION = 7900
 
 # Target size when auto-resizing on API failure (5 MB).  After a provider
 # rejects an image, we downscale to this target and retry once.
@@ -330,13 +350,38 @@ def _is_image_size_error(error: Exception) -> bool:
     ))
 
 
+def _image_exceeds_dimension(image_path: Path, max_dimension: int) -> bool:
+    """True if the image's longest side exceeds ``max_dimension`` px.
+
+    Anthropic enforces an 8000px per-side cap independently of the 5 MB byte
+    cap, so a tall small-byte screenshot can pass every byte check yet trip a
+    non-retryable 400.  Returns False (don't force a resize) when Pillow is
+    unavailable or the file can't be read as an image — the byte-based checks
+    still apply, and we never want a missing soft dependency to break the
+    embed path.
+    """
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(image_path) as _img:
+            return max(_img.size) > max_dimension
+    except Exception:
+        return False
+
+
 def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
-                              max_base64_bytes: int = _RESIZE_TARGET_BYTES) -> str:
+                              max_base64_bytes: int = _RESIZE_TARGET_BYTES,
+                              max_dimension: Optional[int] = None) -> str:
     """Convert an image to a base64 data URL, auto-resizing if too large.
 
     Tries Pillow first to progressively downscale oversized images.  If Pillow
     is not installed or resizing still exceeds the limit, falls back to the raw
     bytes and lets the caller handle the size check.
+
+    Args:
+        max_dimension: If set, images whose longest side exceeds this pixel
+            count are forcibly downscaled even if they're under the byte
+            budget.  Anthropic enforces an 8000 px per-side cap independently
+            of the 5 MB byte cap.
 
     Returns the base64 data URL string.
     """
@@ -344,7 +389,20 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     # Skip the expensive full-read + encode if Pillow can resize directly.
     file_size = image_path.stat().st_size
     estimated_b64 = (file_size * 4) // 3 + 100  # ~header overhead
-    if estimated_b64 <= max_base64_bytes:
+    needs_resize_for_bytes = estimated_b64 > max_base64_bytes
+
+    # Check pixel dimensions even if bytes are fine.
+    needs_resize_for_dims = False
+    if max_dimension is not None:
+        try:
+            from PIL import Image as _PILQuick
+            with _PILQuick.open(image_path) as _quick_img:
+                if max(_quick_img.size) > max_dimension:
+                    needs_resize_for_dims = True
+        except Exception:
+            pass  # can't check; Pillow path below will handle or skip
+
+    if not needs_resize_for_bytes and not needs_resize_for_dims:
         # Small enough — just encode directly.
         data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
         if len(data_url) <= max_base64_bytes:
@@ -357,14 +415,24 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
         from PIL import Image
         import io as _io
     except ImportError:
-        logger.info("Pillow not installed — cannot auto-resize oversized image")
-        if data_url is None:
-            data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
-        return data_url  # caller will raise the size error
+        # Pillow is a lazy-installable soft dependency. Try a best-effort
+        # install (respects security.allow_lazy_installs; no-op if disabled or
+        # offline), then re-import. If it still isn't importable, fall back to
+        # the raw bytes and let the caller raise the size error.
+        try:
+            from tools.lazy_deps import ensure as _ensure_dep
+            _ensure_dep("tool.vision")
+            from PIL import Image
+            import io as _io
+        except Exception:
+            logger.info("Pillow not installed — cannot auto-resize oversized image")
+            if data_url is None:
+                data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
+            return data_url  # caller will raise the size error
 
-    logger.info("Image file is %.1f MB (estimated base64 %.1f MB, limit %.1f MB), auto-resizing...",
+    logger.info("Image file is %.1f MB (estimated base64 %.1f MB, limit %.1f MB, max_dimension=%s), auto-resizing...",
                 file_size / (1024 * 1024), estimated_b64 / (1024 * 1024),
-                max_base64_bytes / (1024 * 1024))
+                max_base64_bytes / (1024 * 1024), max_dimension)
 
     mime = mime_type or _determine_mime_type(image_path)
     # Choose output format: JPEG for photos (smaller), PNG for transparency
@@ -382,12 +450,19 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     if pil_format == "JPEG" and img.mode in {"RGBA", "P"}:
         img = img.convert("RGB")
 
-    # Strategy: halve dimensions until base64 fits, up to 4 rounds.
+    # Strategy: halve dimensions until both base64 fits AND pixel dimensions
+    # are within limits, up to 4 rounds.
     # For JPEG, also try reducing quality at each size step.
     # For PNG, quality is irrelevant — only dimension reduction helps.
     quality_steps = (85, 70, 50) if pil_format == "JPEG" else (None,)
     prev_dims = (img.width, img.height)
     candidate = None  # will be set on first loop iteration
+
+    def _dims_ok(w: int, h: int) -> bool:
+        """True if both pixel dimensions are within the limit."""
+        if max_dimension is None:
+            return True
+        return max(w, h) <= max_dimension
 
     for attempt in range(5):
         if attempt > 0:
@@ -419,7 +494,7 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
             img.save(buf, **save_kwargs)
             encoded = base64.b64encode(buf.getvalue()).decode("ascii")
             candidate = f"data:{out_mime};base64,{encoded}"
-            if len(candidate) <= max_base64_bytes:
+            if len(candidate) <= max_base64_bytes and _dims_ok(img.width, img.height):
                 logger.info("Auto-resized image fits: %.1f MB (quality=%s, %dx%d)",
                             len(candidate) / (1024 * 1024), q,
                             img.width, img.height)
@@ -656,11 +731,25 @@ async def _vision_analyze_native(
             temp_image_path, mime_type=detected_mime_type,
         )
 
-        # Honour the same hard cap as the legacy path. Resize if needed.
-        if len(image_data_url) > _MAX_BASE64_BYTES:
+        # Proactive embed cap: this image gets baked into conversation
+        # history and re-sent on every subsequent turn.  Anthropic rejects
+        # any single base64 image over 5 MB OR over 8000px per side with a
+        # 400, and because history is immutable, an oversized embed
+        # permanently wedges the session — retries can't clear bytes (or
+        # pixels) that are already in the request.  Resize DOWN to the embed
+        # target (4 MB / 7900px, headroom under both ceilings) whenever the
+        # payload exceeds either limit, not just at the 20 MB hard ceiling.
+        _over_bytes = len(image_data_url) > _EMBED_TARGET_BYTES
+        _over_dims = _image_exceeds_dimension(temp_image_path, _EMBED_MAX_DIMENSION)
+        if _over_bytes or _over_dims:
             image_data_url = _resize_image_for_vision(
                 temp_image_path, mime_type=detected_mime_type,
+                max_base64_bytes=_EMBED_TARGET_BYTES,
+                max_dimension=_EMBED_MAX_DIMENSION,
             )
+            # If even resizing can't get under the absolute hard ceiling,
+            # there's nothing more we can do — reject rather than embed a
+            # session-wedging payload.
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 return tool_error(
                     f"Image too large for vision API: base64 payload is "
