@@ -47,14 +47,13 @@ upstream → https://github.com/NousResearch/hermes-agent.git
 
 | File | Purpose |
 |------|---------|
-| `plugins/platforms/eko/adapter.py` | Adapter + OAuth client (~1000 lines) |
+| `plugins/platforms/eko/adapter.py` | Adapter + routing (~1050 lines) |
 | `plugins/platforms/eko/client.py` | Eko API client (separate from adapter) |
 | `plugins/platforms/eko/config.py` | Config dataclass, env/config precedence |
 | `plugins/platforms/eko/inbound.py` | Inbound message normalization |
 | `plugins/platforms/eko/outbound.py` | Outbound sender, route resolution |
 | `plugins/platforms/eko/management.py` | Management tools runtime + config gate |
 | `plugins/platforms/eko/tools.py` | Tool registration (3 management tools) |
-| `plugins/platforms/eko/routing.py` | Session routing logic |
 | `tests/gateway/test_eko_plugin.py` | Tests (212 tests) |
 
 ## Eko API Endpoints
