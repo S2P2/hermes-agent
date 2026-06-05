@@ -50,10 +50,8 @@ Token storage layout
     ``${HERMES_HOME}/google_chat_user_oauth_pending/<sanitized_email>.json``
 - Legacy pending state:
     ``${HERMES_HOME}/google_chat_user_oauth_pending.json``
-- Shared OAuth client (one per host, anchored at the default Hermes root so
-  every profile sees it; a profile-local copy under ``${HERMES_HOME}`` wins
-  when present):
-    ``<default-root>/google_chat_user_client_secret.json`` (default ``~/.hermes``)
+- OAuth client secret (profile-scoped — each profile registers its own):
+    ``${HERMES_HOME}/google_chat_user_client_secret.json``
 """
 
 from __future__ import annotations
